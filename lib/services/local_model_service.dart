@@ -128,13 +128,17 @@ class LocalModelService extends ChangeNotifier {
     _updateStatus('Thinking offline...');
 
     try {
-      final prompt = '''
-You are Lucy, a helpful offline voice assistant.
-Answer the user's question directly and accurately.
-Use simple language and keep the answer concise.
-Reply in the language the user used when possible.
-Do not output JSON or pretend to control the phone.
-If you do not know something, say so honestly.
+      final prompt =
+          '''
+You are Lucy, a concise offline assistant.
+Answer only the user's latest question.
+Use 1 to 3 short sentences unless the user asks for detail or steps.
+For simple factual questions, give the direct answer only.
+Do not repeat greetings, repeat sentences, add unrelated suggestions, or continue after answering.
+Do not invent facts or claim to control the phone.
+Reply in the same language as the user when possible.
+Use plain text, not JSON or markdown headings.
+If you do not know, say so briefly.
 
 User: ${userMessage.trim()}
 Lucy:
@@ -142,8 +146,8 @@ Lucy:
 
       await for (final token in _llama.generate(
         prompt: prompt,
-        maxTokens: 100,
-        temperature: 0.3,
+        maxTokens: 64,
+        temperature: 0.2,
       )) {
         _lastResponse += token;
         if (!_disposed) notifyListeners();

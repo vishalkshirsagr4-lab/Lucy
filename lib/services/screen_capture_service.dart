@@ -146,6 +146,26 @@ class ScreenCaptureManager {
     }
   }
 
+  /// Open a web URL using an installed app or browser.
+  Future<bool> openUrl(String url) async {
+    try {
+      final uri = Uri.tryParse(url);
+      if (uri == null ||
+          (uri.scheme != 'https' && uri.scheme != 'http') ||
+          uri.host.isEmpty) {
+        return false;
+      }
+
+      final result = await _channel.invokeMethod<bool>('openUrl', {
+        'url': uri.toString(),
+      });
+      return result ?? false;
+    } catch (e) {
+      print('Error opening URL: $e');
+      return false;
+    }
+  }
+
   /// Perform a tap at the given coordinates
   Future<bool> performTap(double x, double y) async {
     try {

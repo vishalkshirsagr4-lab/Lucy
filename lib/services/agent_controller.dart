@@ -770,6 +770,11 @@ class AgentController extends ChangeNotifier {
               action.params['package'] as String,
             );
             break;
+          case 'open_url':
+            success = await _screenCapture.openUrl(
+              action.params['url'] as String,
+            );
+            break;
           case 'back':
             success = await _screenCapture.pressBack();
             break;
@@ -786,6 +791,7 @@ class AgentController extends ChangeNotifier {
         final response = success
             ? switch (action.type) {
                 'open_app' => 'Opened ${command.label ?? 'the app'}.',
+                'open_url' => 'Opened ${command.label ?? 'the link'}.',
                 'back' => 'Went back.',
                 'home' => 'Went to the home screen.',
                 _ => 'Command completed.',
