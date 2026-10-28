@@ -41,6 +41,7 @@ class LocalCommandRouter {
         .toLowerCase()
         .replaceAll(RegExp(r'[.!?]+$'), '')
         .replaceAll(RegExp(r'\s+'), ' ');
+
     if (normalized.isEmpty) return null;
 
     switch (normalized) {
@@ -68,22 +69,59 @@ class LocalCommandRouter {
         return const LocalCommand(LocalCommandType.repeat);
     }
 
-    const openPrefixes = ['open ', 'launch '];
-    for (final prefix in openPrefixes) {
-      if (normalized.startsWith(prefix)) {
-        final app = normalized.substring(prefix.length).trim();
-        final package = _apps[app];
-        if (package == null) return null;
+    // Recognize YouTube requests. Search launching is added separately.
+    final searchForMatch = RegExp(
+      r'^search youtube for\s+(.+)$',
+    ).firstMatch(normalized);
+
+    final searchMatch = RegExp(
+      r'^search youtube\s+(.+)$',
+    ).firstMatch(normalized);
+
+    final playMatch = RegExp(
+      r'^(?:play|open youtube and play)\s+(.+)$',
+    ).firstMatch(normalized);
+
+    final simpleSearchQuery = searchMatch?.group(1)?.trim();
+    final query =
+        (searchForMatch?.group(1) ??
+                (simpleSearchQuery == 'for' ? null : simpleSearchQuery) ??
+                playMatch?.group(1))
+            ?.trim();
+
+    if (query != null && query.isNotEmpty) {
+      return LocalCommand(
+        LocalCommandType.action,
+        action: AgentAction(
+          type: 'open_url',
+          params: {
+            'url': Uri.https('www.youtube.com', '/results', {
+              'search_query': query,
+            }).toString(),
+          },
+        ),
+        label: 'YouTube search: $query',
+      );
+    }
+
+    final openMatch = RegExp(
+      r'^(?:please )?(?:open|launch|start)\s+(.+?)(?:\s+please)?$',
+    ).firstMatch(normalized);
+
+    if (openMatch != null) {
+      var app = openMatch.group(1)!.trim();
+      app = app.replaceFirst(RegExp(r'\s+(?:app|application)$'), '');
+
+      final package = _apps[app];
+      if (package != null) {
         return LocalCommand(
           LocalCommandType.action,
-          action: AgentAction(
-            type: 'open_app',
-            params: {'package': package},
-          ),
+          action: AgentAction(type: 'open_app', params: {'package': package}),
           label: app,
         );
       }
     }
+
     return null;
   }
 }

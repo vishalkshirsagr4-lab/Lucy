@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/agent_controller.dart';
+import '../services/local_model_service.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key, required this.controller});
@@ -30,9 +31,11 @@ class SettingsScreen extends StatelessWidget {
             _statusTile(
               context,
               'Local model',
-              controller.aiService.localModelStatus,
+              controller.localModelService.status,
               Icons.memory,
             ),
+            _LocalModelControls(service: controller.localModelService),
+            const SizedBox(height: 12),
             _statusTile(
               context,
               'Speech recognition',
@@ -157,6 +160,134 @@ class SettingsScreen extends StatelessWidget {
       leading: Icon(icon, color: Theme.of(context).colorScheme.secondary),
       title: Text(title),
       subtitle: Text(status),
+    );
+  }
+}
+
+class _LocalModelControls extends StatefulWidget {
+  const _LocalModelControls({required this.service});
+
+  final LocalModelService service;
+
+  @override
+  State<_LocalModelControls> createState() => _LocalModelControlsState();
+}
+
+class _LocalModelControlsState extends State<_LocalModelControls> {
+  final TextEditingController _prompt = TextEditingController(
+    text: 'Introduce yourself as Lucy in one short sentence.',
+  );
+  String _response = '';
+  bool _restoring = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _restore();
+  }
+
+  Future<void> _restore() async {
+    if (_restoring) return;
+    _restoring = true;
+    try {
+      await widget.service.restoreSavedModelPath();
+    } finally {
+      _restoring = false;
+    }
+  }
+
+  @override
+  void dispose() {
+    _prompt.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final service = widget.service;
+
+    return AnimatedBuilder(
+      animation: service,
+      builder: (context, _) => Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Local AI (experimental)',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Choose a GGUF model, load it into memory, then test a prompt. '
+                'The test prompt runs locally and does not use Gemini.',
+              ),
+              if (service.modelPath != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  'Selected: ${service.modelPath!.split('/').last}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: service.isLoading || service.isGenerating
+                    ? null
+                    : service.chooseModel,
+                icon: const Icon(Icons.folder_open),
+                label: const Text('Choose GGUF model'),
+              ),
+              FilledButton.icon(
+                onPressed:
+                    service.isReady &&
+                        !service.isLoading &&
+                        !service.isGenerating
+                    ? service.loadModel
+                    : null,
+                icon: const Icon(Icons.memory),
+                label: Text(
+                  service.isLoading ? 'Loading model...' : 'Load model',
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _prompt,
+                minLines: 1,
+                maxLines: 3,
+                decoration: const InputDecoration(
+                  labelText: 'Offline test prompt',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed:
+                    service.isGenerating ||
+                        service.isLoading ||
+                        service.modelPath == null
+                    ? null
+                    : () async {
+                        final result = await service.testPrompt(
+                          _prompt.text.trim(),
+                        );
+                        if (mounted) setState(() => _response = result);
+                      },
+                icon: const Icon(Icons.play_arrow),
+                label: Text(
+                  service.isGenerating ? 'Generating...' : 'Test offline AI',
+                ),
+              ),
+              if (_response.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                const Text('Response'),
+                SelectableText(_response),
+              ],
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

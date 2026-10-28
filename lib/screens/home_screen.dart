@@ -144,8 +144,7 @@ class _HomeScreenState extends State<HomeScreen>
             tooltip: 'Settings',
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute<void>(
-                builder: (_) =>
-                    SettingsScreen(controller: widget.controller),
+                builder: (_) => SettingsScreen(controller: widget.controller),
               ),
             ),
           ),
@@ -190,16 +189,16 @@ class _HomeScreenState extends State<HomeScreen>
       ('Local AI', 'Unavailable'),
       (
         'Speech',
-        controller.speechRecognitionReady
-            ? 'Device recognizer'
-            : 'Unavailable',
+        controller.speechRecognitionReady ? 'Device recognizer' : 'Unavailable',
       ),
       ('Microphone', controller.microphoneStatus),
       ('Wake word', 'Unavailable'),
       ('Background', 'Manual only'),
       (
         'Internet',
-        controller.aiService.isConfigured ? 'Required for Gemini' : 'Not measured',
+        controller.aiService.isConfigured
+            ? 'Required for Gemini'
+            : 'Not measured',
       ),
       ('Accessibility', _isAccessibilityEnabled ? 'Enabled' : 'Not enabled'),
       (

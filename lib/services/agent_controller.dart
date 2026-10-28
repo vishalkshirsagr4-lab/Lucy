@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'ai_service.dart';
+import 'local_model_service.dart';
 import 'command_router.dart';
 import 'voice_service.dart';
 import 'screen_capture_service.dart';
@@ -56,6 +57,7 @@ class _ActionExecutionResult {
 
 class AgentController extends ChangeNotifier {
   final AiService _aiService = AiService();
+  final LocalModelService _localModelService = LocalModelService();
   final VoiceService _voiceService = VoiceService();
   final ScreenCaptureManager _screenCapture = ScreenCaptureManager();
   final LocalCommandRouter _commandRouter = LocalCommandRouter();
@@ -177,6 +179,7 @@ class AgentController extends ChangeNotifier {
   );
 
   AiService get aiService => _aiService;
+  LocalModelService get localModelService => _localModelService;
   ScreenCaptureManager get screenCapture => _screenCapture;
   bool get speechRecognitionReady => _isVoiceReady;
   String get microphoneStatus => _voiceService.isListening
@@ -184,7 +187,8 @@ class AgentController extends ChangeNotifier {
       : 'Not active; Android permission is requested when voice starts';
   double get speechRate => _voiceService.speechRate;
   Duration get followupTimeout => _followupTimeout;
-  String get wakeWordStatus => 'Unavailable: no offline wake-word engine installed';
+  String get wakeWordStatus =>
+      'Unavailable: no offline wake-word engine installed';
   String get backgroundListeningStatus =>
       'Unavailable: voice input is manual and stops outside the active app session';
 
@@ -206,6 +210,12 @@ class AgentController extends ChangeNotifier {
     }
 
     final savedSpeechRate = prefs.getDouble('lucy_speech_rate');
+    if (savedSpeechRate != null &&
+        savedSpeechRate >= 0.1 &&
+        savedSpeechRate <= 1.0) {
+      await _voiceService.setSpeechRate(savedSpeechRate);
+    }
+
     final savedTimeoutSeconds = prefs.getInt('lucy_followup_timeout_seconds');
     if (savedTimeoutSeconds != null &&
         savedTimeoutSeconds >= 15 &&
@@ -324,7 +334,8 @@ class AgentController extends ChangeNotifier {
       'Manual voice listening started. Lucy does not listen for a wake phrase in the background.',
       false,
     );
-    _statusMessage = 'Manual listening is active in Lucy. Tap the button to stop.';
+    _statusMessage =
+        'Manual listening is active in Lucy. Tap the button to stop.';
     _isAskingForFurtherHelp = false;
     notifyListeners();
 
@@ -390,10 +401,7 @@ class AgentController extends ChangeNotifier {
   }
 
   /// Main handler: user says something → agent loop begins.
-  Future<void> _handleUserInput(
-    String text, {
-    bool voiceInput = true,
-  }) async {
+  Future<void> _handleUserInput(String text, {bool voiceInput = true}) async {
     if (!_isActive ||
         (voiceInput && _state != AgentState.listening) ||
         (!voiceInput &&
@@ -427,14 +435,31 @@ class AgentController extends ChangeNotifier {
     }
 
     if (!_aiService.isConfigured) {
-      final message =
-          'Online AI is not configured, and local model inference is not supported in this build. '
-          'I can still handle supported commands such as opening apps, back, and home. '
-          'Configure Gemini to interpret other requests.';
-      _addConversation(message, false);
-      _isAskingForFurtherHelp = true;
-      _statusMessage = _aiService.localModelStatus;
-      await _speakAndWait(message);
+      String message;
+
+      if (await _localModelService.isModelLoaded) {
+        _statusMessage = 'Thinking offline...';
+        notifyListeners();
+
+        final inferenceTimer = Stopwatch()..start();
+        message = await _localModelService.chat(text);
+
+        debugPrint(
+          'Lucy[$requestId] stage=local_ai elapsed_ms=${inferenceTimer.elapsedMilliseconds}',
+        );
+      } else {
+        message =
+            'Online AI is not configured, and the offline model is not loaded. '
+            'Load your GGUF model in Settings, or configure Gemini for online AI.';
+      }
+
+      if (message.trim().isNotEmpty) {
+        _addConversation(message, false);
+        _lastAssistantResponse = message;
+        _isAskingForFurtherHelp = true;
+        await _speakAndWait(message);
+      }
+
       debugPrint(
         'Lucy[$requestId] stage=total elapsed_ms=${requestTimer.elapsedMilliseconds}',
       );
@@ -519,10 +544,7 @@ class AgentController extends ChangeNotifier {
   }
 
   /// The core agent loop: capture → analyze → act → repeat.
-  Future<void> _runAgentLoop(
-    String userMessage, {
-    String? requestId,
-  }) async {
+  Future<void> _runAgentLoop(String userMessage, {String? requestId}) async {
     _cancelRequested = false;
     int step = 0;
     String currentMessage = userMessage;
@@ -670,7 +692,6 @@ class AgentController extends ChangeNotifier {
         while (_voiceService.isSpeaking && !_cancelRequested) {
           await Future.delayed(const Duration(milliseconds: 200));
         }
-
       }
 
       if (_cancelRequested) break;
@@ -749,6 +770,11 @@ class AgentController extends ChangeNotifier {
               action.params['package'] as String,
             );
             break;
+          case 'open_url':
+            success = await _screenCapture.openUrl(
+              action.params['url'] as String,
+            );
+            break;
           case 'back':
             success = await _screenCapture.pressBack();
             break;
@@ -765,6 +791,7 @@ class AgentController extends ChangeNotifier {
         final response = success
             ? switch (action.type) {
                 'open_app' => 'Opened ${command.label ?? 'the app'}.',
+                'open_url' => 'Opened ${command.label ?? 'the link'}.',
                 'back' => 'Went back.',
                 'home' => 'Went to the home screen.',
                 _ => 'Command completed.',
@@ -802,7 +829,6 @@ class AgentController extends ChangeNotifier {
         // Increasing delay between retries: 200ms, 400ms
         await Future.delayed(Duration(milliseconds: 200 * (i + 1)));
       }
-
     }
     print('All $maxRetries screenshot capture attempts failed');
     return null;
@@ -1184,6 +1210,7 @@ class AgentController extends ChangeNotifier {
   void dispose() {
     _followupTimeoutTimer?.cancel();
     _voiceService.dispose();
+    _localModelService.dispose();
     super.dispose();
   }
 }

@@ -131,12 +131,25 @@ class AgentResponse {
   }
 
   factory AgentResponse.fallback(String raw) {
+    // Never speak raw provider output, stack traces, or leaked instructions.
+    final lower = raw.toLowerCase();
+    final safeMessage =
+        lower.contains('not configured') || lower.contains('api key')
+        ? 'AI is not configured yet. Add your API key in Settings.'
+        : lower.startsWith('error:') ||
+              lower.contains('socketexception') ||
+              lower.contains('timed out') ||
+              lower.contains('quota') ||
+              lower.contains('invalid response')
+        ? 'I could not complete that. Check your connection and AI settings.'
+        : 'I could not safely understand the response, so I did not perform an action.';
+
     return AgentResponse(
-      actions: [],
-      speak: raw.length > 300 ? '${raw.substring(0, 297)}...' : raw,
+      actions: const [],
+      speak: safeMessage,
       done: true,
-      lang: '',
-      rawResponse: raw,
+      lang: 'en',
+      rawResponse: '',
     );
   }
 }
@@ -339,10 +352,7 @@ RESPONSE FORMAT (strict JSON, one action only):
       throw const FormatException('Invalid screen dimensions');
     }
     final action = response.actions.single;
-    final coordinates = [
-      action.params['startX'],
-      action.params['endX'],
-    ];
+    final coordinates = [action.params['startX'], action.params['endX']];
     final verticalCoordinates = [
       action.params['startY'],
       action.params['endY'],

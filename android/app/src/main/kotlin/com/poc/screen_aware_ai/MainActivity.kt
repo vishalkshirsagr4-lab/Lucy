@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.content.IntentFilter
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -141,8 +142,10 @@ class MainActivity : FlutterActivity() {
                     val text = call.argument<String>("text") ?: ""
                     val service = ScreenActionService.instance
                     if (service != null) {
-                        service.performType(text)
-                        result.success(true)
+                        Thread {
+                            val success = service.performType(text)
+                            runOnUiThread { result.success(success) }
+                        }.start()
                     } else {
                         result.error("NO_SERVICE", "Accessibility service not enabled", null)
                     }
@@ -150,8 +153,7 @@ class MainActivity : FlutterActivity() {
                 "pressBack" -> {
                     val service = ScreenActionService.instance
                     if (service != null) {
-                        service.pressBack()
-                        result.success(true)
+                        result.success(service.pressBack())
                     } else {
                         result.error("NO_SERVICE", "Accessibility service not enabled", null)
                     }
@@ -159,8 +161,7 @@ class MainActivity : FlutterActivity() {
                 "pressHome" -> {
                     val service = ScreenActionService.instance
                     if (service != null) {
-                        service.pressHome()
-                        result.success(true)
+                        result.success(service.pressHome())
                     } else {
                         result.error("NO_SERVICE", "Accessibility service not enabled", null)
                     }
@@ -178,6 +179,24 @@ class MainActivity : FlutterActivity() {
                         }
                     } catch (e: Exception) {
                         result.error("LAUNCH_FAILED", "Could not launch $packageName: ${e.message}", null)
+                    }
+                }
+                "openUrl" -> {
+                    val url = call.argument<String>("url") ?: ""
+                    val uri = Uri.parse(url)
+                    if ((uri.scheme != "https" && uri.scheme != "http") ||
+                        uri.host.isNullOrBlank()
+                    ) {
+                        result.success(false)
+                    } else {
+                        try {
+                            val intent = Intent(Intent.ACTION_VIEW, uri)
+                            startActivity(intent)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Could not open URL", e)
+                            result.success(false)
+                        }
                     }
                 }
                 "performSwipe" -> {

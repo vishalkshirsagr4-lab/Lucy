@@ -35,8 +35,10 @@ dependencies:
   google_generative_ai: ^0.4.6
   speech_to_text: ^7.0.0
   flutter_tts: ^4.2.0
-  path_provider: ^2.1.5
   shared_preferences: ^2.3.4
+  llama_flutter_android: ^0.2.6
+  file_picker: ^13.3.0
+  path_provider: ^2.1.6
 
 dev_dependencies:
   flutter_test:
