@@ -435,14 +435,31 @@ class AgentController extends ChangeNotifier {
     }
 
     if (!_aiService.isConfigured) {
-      final message =
-          'Online AI is not configured, and local model inference is not supported in this build. '
-          'I can still handle supported commands such as opening apps, back, and home. '
-          'Configure Gemini to interpret other requests.';
-      _addConversation(message, false);
-      _isAskingForFurtherHelp = true;
-      _statusMessage = _aiService.localModelStatus;
-      await _speakAndWait(message);
+      String message;
+
+      if (await _localModelService.isModelLoaded) {
+        _statusMessage = 'Thinking offline...';
+        notifyListeners();
+
+        final inferenceTimer = Stopwatch()..start();
+        message = await _localModelService.chat(text);
+
+        debugPrint(
+          'Lucy[$requestId] stage=local_ai elapsed_ms=${inferenceTimer.elapsedMilliseconds}',
+        );
+      } else {
+        message =
+            'Online AI is not configured, and the offline model is not loaded. '
+            'Load your GGUF model in Settings, or configure Gemini for online AI.';
+      }
+
+      if (message.trim().isNotEmpty) {
+        _addConversation(message, false);
+        _lastAssistantResponse = message;
+        _isAskingForFurtherHelp = true;
+        await _speakAndWait(message);
+      }
+
       debugPrint(
         'Lucy[$requestId] stage=total elapsed_ms=${requestTimer.elapsedMilliseconds}',
       );

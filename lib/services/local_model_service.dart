@@ -103,6 +103,66 @@ class LocalModelService extends ChangeNotifier {
     }
   }
 
+  Future<bool> get isModelLoaded async {
+    if (_loading || _disposed) return false;
+    try {
+      return await _llama.isModelLoaded();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Answers ordinary questions locally without generating Android actions.
+  Future<String> chat(String userMessage) async {
+    if (_loading || _generating) {
+      return 'Lucy is busy. Please wait a moment.';
+    }
+
+    if (!await isModelLoaded) {
+      _updateStatus('Load your local GGUF model in Settings first.');
+      return 'My offline AI is not loaded yet. Please load the model in Settings.';
+    }
+
+    _generating = true;
+    _lastResponse = '';
+    _updateStatus('Thinking offline...');
+
+    try {
+      final prompt = '''
+You are Lucy, a helpful offline voice assistant.
+Answer the user's question directly and accurately.
+Use simple language and keep the answer concise.
+Reply in the language the user used when possible.
+Do not output JSON or pretend to control the phone.
+If you do not know something, say so honestly.
+
+User: ${userMessage.trim()}
+Lucy:
+''';
+
+      await for (final token in _llama.generate(
+        prompt: prompt,
+        maxTokens: 100,
+        temperature: 0.3,
+      )) {
+        _lastResponse += token;
+        if (!_disposed) notifyListeners();
+      }
+
+      final answer = _lastResponse.trim();
+      _updateStatus('Offline response complete.');
+      return answer.isEmpty
+          ? 'I could not generate an answer. Please try again.'
+          : answer;
+    } catch (error) {
+      _updateStatus('Offline chat failed: $error');
+      return 'Offline response failed. Please try again.';
+    } finally {
+      _generating = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
   Future<void> loadModel() async {
     if (_loading || _generating) return;
 
