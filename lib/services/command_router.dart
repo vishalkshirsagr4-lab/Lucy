@@ -70,15 +70,24 @@ class LocalCommandRouter {
     }
 
     // Recognize YouTube requests. Search launching is added separately.
+    final searchForMatch = RegExp(
+      r'^search youtube for\s+(.+)$',
+    ).firstMatch(normalized);
+
     final searchMatch = RegExp(
-      r'^(?:search youtube for|search youtube|play)\s+(.+)$',
+      r'^search youtube\s+(.+)$',
     ).firstMatch(normalized);
 
     final playMatch = RegExp(
-      r'^open youtube and play\s+(.+)$',
+      r'^(?:play|open youtube and play)\s+(.+)$',
     ).firstMatch(normalized);
 
-    final query = (searchMatch?.group(1) ?? playMatch?.group(1))?.trim();
+    final simpleSearchQuery = searchMatch?.group(1)?.trim();
+    final query =
+        (searchForMatch?.group(1) ??
+                (simpleSearchQuery == 'for' ? null : simpleSearchQuery) ??
+                playMatch?.group(1))
+            ?.trim();
 
     if (query != null && query.isNotEmpty) {
       return LocalCommand(
