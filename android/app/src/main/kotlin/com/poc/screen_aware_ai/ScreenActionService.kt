@@ -79,19 +79,30 @@ class ScreenActionService : AccessibilityService() {
         return dispatchGestureSync(gestureBuilder.build())
     }
 
-    fun performType(text: String) {
-        val rootNode = rootInActiveWindow ?: return
-        val focusedNode = findFocusedEditText(rootNode)
-
-        if (focusedNode != null) {
-            val arguments = Bundle()
-            arguments.putCharSequence(
-                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                text
-            )
-            focusedNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+    fun performType(text: String): Boolean {
+        val rootNode = rootInActiveWindow ?: return false
+        return try {
+            val focusedNode = findFocusedEditText(rootNode) ?: return false
+            try {
+                val arguments = Bundle().apply {
+                    putCharSequence(
+                        AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                        text
+                    )
+                }
+                focusedNode.performAction(
+                    AccessibilityNodeInfo.ACTION_SET_TEXT,
+                    arguments
+                )
+            } finally {
+                focusedNode.recycle()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "performType failed", e)
+            false
+        } finally {
+            rootNode.recycle()
         }
-        rootNode.recycle()
     }
 
     private fun findFocusedEditText(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -119,12 +130,12 @@ class ScreenActionService : AccessibilityService() {
         return dispatchGestureSync(gestureBuilder.build())
     }
 
-    fun pressBack() {
-        performGlobalAction(GLOBAL_ACTION_BACK)
+    fun pressBack(): Boolean {
+        return performGlobalAction(GLOBAL_ACTION_BACK)
     }
 
-    fun pressHome() {
-        performGlobalAction(GLOBAL_ACTION_HOME)
+    fun pressHome(): Boolean {
+        return performGlobalAction(GLOBAL_ACTION_HOME)
     }
 
     /**
