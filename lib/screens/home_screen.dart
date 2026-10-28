@@ -164,24 +164,16 @@ class _HomeScreenState extends State<HomeScreen>
       ),
       body: Column(
         children: [
-          // Status bar
           _buildStatusBar(colorScheme),
           _buildCapabilitySummary(colorScheme),
-
-          // Conversation list
           Expanded(
             child: widget.controller.conversation.isEmpty
                 ? _buildEmptyState(colorScheme)
                 : _buildConversationList(colorScheme),
           ),
-
-          // Current transcript
           if (widget.controller.currentTranscript?.isNotEmpty == true)
             _buildTranscriptBar(colorScheme),
-
           _buildManualCommandInput(),
-
-          // Bottom bar with mic button
           _buildBottomBar(colorScheme),
         ],
       ),
@@ -205,42 +197,53 @@ class _HomeScreenState extends State<HomeScreen>
       ('Microphone', controller.microphoneStatus),
       ('Wake word', 'Unavailable'),
       ('Background', 'Manual only'),
-      ('Internet', controller.aiService.isConfigured ? 'Required for Gemini' : 'Not measured'),
+      (
+        'Internet',
+        controller.aiService.isConfigured ? 'Required for Gemini' : 'Not measured',
+      ),
       ('Accessibility', _isAccessibilityEnabled ? 'Enabled' : 'Not enabled'),
       (
         'Screen capture',
         controller.screenCapture.hasPermission ? 'Granted' : 'Not granted',
       ),
     ];
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-          child: Wrap(
-            spacing: 8,
-            runSpacing: 4,
-            children: statuses
-                .map(
-                  (status) => Chip(
-                    visualDensity: VisualDensity.compact,
-                    label: Text('${status.$1}: ${status.$2}'),
-                    backgroundColor: colorScheme.surfaceContainerHighest,
-                  ),
-                )
-                .toList(),
-          ),
-        ),
-        if (!_isAccessibilityEnabled)
-          Padding(
-            padding: const EdgeInsets.only(left: 12, bottom: 4),
-            child: TextButton.icon(
-              onPressed: widget.controller.screenCapture.openAccessibilitySettings,
-              icon: const Icon(Icons.accessibility_new),
-              label: const Text('Enable accessibility for UI automation'),
+
+    return SizedBox(
+      height: 130,
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: statuses
+                    .map(
+                      (status) => Chip(
+                        visualDensity: VisualDensity.compact,
+                        label: Text('${status.$1}: ${status.$2}'),
+                        backgroundColor: colorScheme.surfaceContainerHighest,
+                      ),
+                    )
+                    .toList(),
+              ),
             ),
-          ),
-      ],
+            if (!_isAccessibilityEnabled)
+              Padding(
+                padding: const EdgeInsets.only(left: 12, bottom: 4),
+                child: TextButton.icon(
+                  onPressed:
+                      widget.controller.screenCapture.openAccessibilitySettings,
+                  icon: const Icon(Icons.accessibility_new),
+                  label: const Text('Enable accessibility for UI automation'),
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 
