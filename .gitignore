@@ -49,3 +49,15 @@ app.*.map.json
 /android/key.properties
 *.jks
 *.keystore
+
+# Local AI models and private backups
+*.gguf
+lucy-ai/
+backups/
+.env
+.env.*
+!.env.example
+
+# Local machine and generated files
+.DS_Store
+Thumbs.db
