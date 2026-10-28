@@ -13,8 +13,7 @@ const MethodChannel _screenChannel = MethodChannel(
 
 /// Answer [_screenChannel] calls with canned results.
 ///
-/// [accessibilityEnabled] decides whether the app renders its
-/// "Accessibility Required" gate or the main conversation screen.
+/// [accessibilityEnabled] controls the capability status shown by the app.
 void _mockScreenChannel({required bool accessibilityEnabled}) {
   TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
       .setMockMethodCallHandler(_screenChannel, (call) async {
@@ -50,7 +49,7 @@ void main() {
         .setMockMethodCallHandler(_screenChannel, null);
   });
 
-  testWidgets('shows the accessibility gate when the service is off', (
+  testWidgets('shows manual controls when the accessibility service is off', (
     tester,
   ) async {
     _mockScreenChannel(accessibilityEnabled: false);
@@ -58,8 +57,9 @@ void main() {
     await tester.pumpWidget(const LucyApp());
     await tester.pumpAndSettle();
 
-    expect(find.text('Accessibility Required'), findsOneWidget);
-    expect(find.text('Open Settings'), findsOneWidget);
+    expect(find.text('Lucy'), findsOneWidget);
+    expect(find.text('Type a command'), findsOneWidget);
+    expect(find.textContaining('Accessibility: Not enabled'), findsOneWidget);
   });
 
   testWidgets('shows the main screen when accessibility is enabled', (
@@ -71,6 +71,6 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Lucy'), findsOneWidget);
-    expect(find.text('Accessibility Required'), findsNothing);
+    expect(find.textContaining('Accessibility: Enabled'), findsOneWidget);
   });
 }

@@ -114,6 +114,76 @@ That turned out to be one case out of several. The common thread is *your hands 
 | 🎨 **Live transcript** | Every screenshot, action and reply is shown in a scrollable conversation view. |
 | 🔑 **Bring your own key** | Your Gemini API key stays on your device. No backend, no telemetry, no account. |
 
+## Current offline and provider limitations
+
+Lucy can start voice interaction without a Gemini key. A small deterministic
+router handles a limited set of exact commands (supported app launches, back,
+home, stop/sleep, cancel, and repeat) without sending them to an AI service.
+Other requests require a configured Gemini API key; without one, Lucy explains
+that she cannot interpret the request. Configure Gemini only if you consent to
+sending the request and any attached screen content to Google.
+
+This repository does **not yet include** a local GGUF inference runtime, model
+import/management, or a selectable local-vs-online provider setting. No model
+is downloaded or bundled. The current Android speech plugin delegates
+recognition to the device's speech-recognition service; offline recognition
+availability and language packs vary by device and are not verified by Lucy.
+There is no offline wake-word detector, so voice activation currently requires
+starting Lucy from the in-app microphone control. Do not treat this build as an
+always-listening or offline-capable assistant.
+
+AI action output is parsed against a small allowlist before execution. Action
+success messages are based on the Android method-channel operation's returned
+result, not on model-generated text. Debug timing logs include request/session
+IDs and stage durations, but do not include recognized speech or API keys.
+The Gemini key is kept in memory for the current app session only; it is not
+stored in SharedPreferences. Re-enter it after restarting Lucy.
+
+The current UI provides manual text commands, separate capability indicators,
+editable speech language/rate, a configurable follow-up timeout, and local
+transcript history (up to 100 text entries; screenshots and microphone audio
+are not persisted). History can be cleared from the conversation screen.
+Speech language and settings do not install device recognition models.
+
+### Android background and avatar status
+
+The existing Android foreground services manage screen projection and a
+temporary stop-controls notification; neither service owns the microphone.
+The RECORD_AUDIO permission is declared, and Android's speech plugin is used
+only for an in-app listening session. This repository does not implement a
+microphone foreground service, a persistent wake-word monitor, wake phrase
+configuration, or low-power background mode. Do not expect listening to
+continue after Lucy is stopped or Android suspends the app.
+
+`assets/amica/` contains VRM avatars, VRMA animation clips, and GLB environment
+and controller assets. Their included Amica license is MIT (copyright
+Semper AI and pixiv Inc.). No compatible VRM/VRMA renderer is currently
+integrated, so these binary assets are not presented as a running avatar.
+Avatar animation, lip synchronization, and renderer performance are therefore
+unavailable and untested.
+
+### Local development verification
+
+From the repository root, install the Flutter SDK and Android SDK/JDK
+requirements described in [Building & Releasing](#-building--releasing), then
+run:
+
+```sh
+flutter pub get
+dart format .
+flutter analyze
+flutter test
+flutter build apk --debug
+```
+
+Install on a connected Android device with `flutter run -d <device-id>`.
+Microphone permission is requested by Android when voice listening is started;
+screen capture permission is requested only when a screen-aware AI task needs
+a screenshot. Accessibility permission is required for UI actions. Exact
+recognition behavior, offline availability, and latency depend on the device
+speech service and have not been verified on a real device in this repository
+environment.
+
 ---
 
 ## 📥 Download & Install

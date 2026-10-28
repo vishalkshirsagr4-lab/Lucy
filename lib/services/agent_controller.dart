@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'ai_service.dart';
+import 'command_router.dart';
 import 'voice_service.dart';
 import 'screen_capture_service.dart';
 
@@ -46,10 +47,18 @@ class _UiSnapshot {
   String get signature => rawTree ?? '';
 }
 
+class _ActionExecutionResult {
+  const _ActionExecutionResult(this.snapshot, this.succeeded);
+
+  final _UiSnapshot? snapshot;
+  final bool succeeded;
+}
+
 class AgentController extends ChangeNotifier {
   final AiService _aiService = AiService();
   final VoiceService _voiceService = VoiceService();
   final ScreenCaptureManager _screenCapture = ScreenCaptureManager();
+  final LocalCommandRouter _commandRouter = LocalCommandRouter();
 
   AgentState _state = AgentState.idle;
   AgentState get state => _state;
@@ -58,7 +67,7 @@ class AgentController extends ChangeNotifier {
   List<ConversationEntry> get conversation => List.unmodifiable(_conversation);
 
   String _statusMessage =
-      'I can see your screen and help you interact with apps';
+      'Use a text command or start manual foreground listening.';
   String get statusMessage => _statusMessage;
 
   Uint8List? _lastScreenshotBytes;
@@ -83,6 +92,14 @@ class AgentController extends ChangeNotifier {
   bool _cancelRequested = false;
 
   bool _isAskingForFurtherHelp = false;
+  String? _lastAssistantResponse;
+  int _requestSequence = 0;
+  bool _isVoiceReady = false;
+  Timer? _followupTimeoutTimer;
+  Duration _followupTimeout = const Duration(minutes: 2);
+  static const String _historyPrefKey = 'lucy_conversation_history';
+  static const int _maxHistoryEntries = 100;
+  Future<void> _historyWrite = Future<void>.value();
 
   /// Language code of the most recent agent reply ("en" or "ja").
   /// Used to localize hardcoded follow-ups, cancel-word detection, TTS, and STT locale.
@@ -106,6 +123,33 @@ class AgentController extends ChangeNotifier {
       await _voiceService.stopListening();
       _startListening();
     }
+  }
+
+  Future<void> setSpeechRate(double rate) async {
+    await _voiceService.setSpeechRate(rate);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('lucy_speech_rate', rate);
+    notifyListeners();
+  }
+
+  Future<void> setFollowupTimeout(Duration timeout) async {
+    if (timeout < const Duration(seconds: 15) ||
+        timeout > const Duration(minutes: 10)) {
+      throw ArgumentError.value(
+        timeout,
+        'timeout',
+        'Must be between 15 seconds and 10 minutes',
+      );
+    }
+    _followupTimeout = timeout;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('lucy_followup_timeout_seconds', timeout.inSeconds);
+    _followupTimeoutTimer?.cancel();
+    _followupTimeoutTimer = null;
+    if (_isActive && _isAskingForFurtherHelp) {
+      _scheduleFollowupTimeout();
+    }
+    notifyListeners();
   }
 
   static const Map<String, String> _followUps = {
@@ -134,6 +178,15 @@ class AgentController extends ChangeNotifier {
 
   AiService get aiService => _aiService;
   ScreenCaptureManager get screenCapture => _screenCapture;
+  bool get speechRecognitionReady => _isVoiceReady;
+  String get microphoneStatus => _voiceService.isListening
+      ? 'Active in the current app session'
+      : 'Not active; Android permission is requested when voice starts';
+  double get speechRate => _voiceService.speechRate;
+  Duration get followupTimeout => _followupTimeout;
+  String get wakeWordStatus => 'Unavailable: no offline wake-word engine installed';
+  String get backgroundListeningStatus =>
+      'Unavailable: voice input is manual and stops outside the active app session';
 
   /// Whether a cancel has been requested by the user.
   bool get cancelRequested => _cancelRequested;
@@ -152,7 +205,36 @@ class AgentController extends ChangeNotifier {
       _currentLang = savedLang;
     }
 
-    await _voiceService.initialize();
+    final savedSpeechRate = prefs.getDouble('lucy_speech_rate');
+    final savedTimeoutSeconds = prefs.getInt('lucy_followup_timeout_seconds');
+    if (savedTimeoutSeconds != null &&
+        savedTimeoutSeconds >= 15 &&
+        savedTimeoutSeconds <= 600) {
+      _followupTimeout = Duration(seconds: savedTimeoutSeconds);
+    }
+    final savedHistory = prefs.getStringList(_historyPrefKey) ?? const [];
+    for (final item in savedHistory.take(_maxHistoryEntries)) {
+      try {
+        final entry = jsonDecode(item) as Map<String, dynamic>;
+        final text = entry['text'];
+        final isUser = entry['isUser'];
+        final timestamp = entry['timestamp'];
+        if (text is String && isUser is bool && timestamp is String) {
+          _conversation.add(
+            ConversationEntry(
+              text: text,
+              isUser: isUser,
+              timestamp: DateTime.tryParse(timestamp),
+            ),
+          );
+        }
+      } on FormatException catch (error) {
+        debugPrint('Ignoring malformed saved conversation entry: $error');
+      } catch (error) {
+        debugPrint('Could not restore a saved conversation entry: $error');
+      }
+    }
+    notifyListeners();
 
     // Wire native stop notification action → requestCancel
     _screenCapture.onForceStop = () {
@@ -197,14 +279,26 @@ class AgentController extends ChangeNotifier {
     };
 
     _voiceService.onError = (error) {
-      print('Voice error: $error');
+      debugPrint('Voice error: $error');
       if (_isActive && _state == AgentState.listening) {
         if (error == 'error_busy' || error == 'error_client') {
-          // Avoid infinite loops if Android STT client is busy or STT dead.
+          _statusMessage =
+              'Speech recognition is busy or unavailable. Tap the microphone to retry.';
+          _isActive = false;
+          _setState(AgentState.idle);
+          notifyListeners();
           return;
         }
-        Future.delayed(const Duration(seconds: 1), () {
-          if (_isActive) _startListening();
+        _listenRetryCount++;
+        if (_listenRetryCount > _maxListenRetries) {
+          _isActive = false;
+          _statusMessage = 'Speech recognition failed: $error';
+          _setState(AgentState.idle);
+          notifyListeners();
+          return;
+        }
+        Future.delayed(Duration(seconds: _listenRetryCount), () {
+          if (_isActive && _state == AgentState.listening) _startListening();
         });
       }
     };
@@ -224,36 +318,38 @@ class AgentController extends ChangeNotifier {
   }
 
   Future<void> startAgent() async {
-    if (!_aiService.isConfigured) {
-      _statusMessage = '⚠️ Please set your Gemini API key first';
-      notifyListeners();
-      return;
-    }
-
+    if (_isActive) return;
     _isActive = true;
     _addConversation(
-      'Agent started. Listening for your commands. To stop Lucy while it is in another app, open notifications and tap "Stop Lucy".',
+      'Manual voice listening started. Lucy does not listen for a wake phrase in the background.',
       false,
     );
-    _statusMessage = 'Listening... Open notifications to stop Lucy.';
+    _statusMessage = 'Manual listening is active in Lucy. Tap the button to stop.';
     _isAskingForFurtherHelp = false;
     notifyListeners();
 
-    // Request screen capture permission
-    final hasScreenPermission = await _screenCapture.requestPermission();
-    if (!hasScreenPermission) {
-      _addConversation(
-        '⚠️ Screen capture permission denied. I can still listen and talk, but cannot see the screen.',
-        false,
-      );
+    _isVoiceReady = await _voiceService.initialize();
+    final prefs = await SharedPreferences.getInstance();
+    final savedSpeechRate = prefs.getDouble('lucy_speech_rate');
+    if (savedSpeechRate != null &&
+        savedSpeechRate >= 0.1 &&
+        savedSpeechRate <= 1.0) {
+      await _voiceService.setSpeechRate(savedSpeechRate);
+    }
+    if (!_isVoiceReady) {
+      _isActive = false;
+      _statusMessage =
+          'Speech recognition is unavailable. Check Android microphone permission and speech services.';
+      _setState(AgentState.idle);
+      return;
     }
 
     // Check if accessibility service is enabled
     final hasAccessibility = await _screenCapture.isAccessibilityEnabled();
     if (!hasAccessibility) {
       _addConversation(
-        '⚠️ Accessibility service not enabled. I can see the screen but cannot perform actions (tap, type, swipe). '
-        'Go to Settings → Accessibility → Lucy to enable it.',
+        '⚠️ Accessibility service is not enabled. UI actions (tap, type, swipe) are unavailable. '
+        'Enable Lucy in Android Settings → Accessibility.',
         false,
       );
     }
@@ -262,21 +358,29 @@ class AgentController extends ChangeNotifier {
     _startListening();
   }
 
-  Future<void> stopAgent() async {
+  Future<void> stopAgent({String? statusMessage}) async {
     _isActive = false;
+    _followupTimeoutTimer?.cancel();
+    _followupTimeoutTimer = null;
     _cancelRequested = false;
     await _voiceService.stopListening();
     await _voiceService.stopSpeaking();
     _setState(AgentState.idle);
-    _statusMessage = 'I can see your screen and help you interact with apps';
+    _statusMessage =
+        statusMessage ??
+        'Lucy is stopped. Use text commands or start manual listening.';
     _addConversation('Agent stopped.', false);
     notifyListeners();
   }
 
   Future<void> _startListening() async {
     if (!_isActive) return;
+    if (_isAskingForFurtherHelp) {
+      _scheduleFollowupTimeout();
+    }
     _setState(AgentState.listening);
-    _statusMessage = '🎤 Listening... Open notifications to stop Lucy.';
+    _statusMessage =
+        "🎤 I'm listening in the foreground. Wake-word detection is unavailable.";
     _currentTranscript = '';
     notifyListeners();
 
@@ -286,15 +390,57 @@ class AgentController extends ChangeNotifier {
   }
 
   /// Main handler: user says something → agent loop begins.
-  Future<void> _handleUserInput(String text) async {
-    if (!_isActive || _state != AgentState.listening) return;
+  Future<void> _handleUserInput(
+    String text, {
+    bool voiceInput = true,
+  }) async {
+    if (!_isActive ||
+        (voiceInput && _state != AgentState.listening) ||
+        (!voiceInput &&
+            _state != AgentState.idle &&
+            _state != AgentState.listening)) {
+      return;
+    }
 
-    // Immediately change state to prevent multipleSTT events or auto-restarts
+    _followupTimeoutTimer?.cancel();
+    _followupTimeoutTimer = null;
     _setState(AgentState.analyzing);
-    await _voiceService.stopListening();
+    if (voiceInput) {
+      await _voiceService.stopListening();
+    }
+    final requestId =
+        '${DateTime.now().microsecondsSinceEpoch}-${++_requestSequence}';
+    final requestTimer = Stopwatch()..start();
+    debugPrint('Lucy[$requestId] stage=command_received');
 
     _addConversation(text, true);
     _currentTranscript = '';
+
+    final routedCommand = _commandRouter.route(text);
+    if (routedCommand != null) {
+      await _handleLocalCommand(routedCommand, requestId);
+      debugPrint(
+        'Lucy[$requestId] stage=total elapsed_ms=${requestTimer.elapsedMilliseconds}',
+      );
+      if (voiceInput && _isActive) _startListening();
+      return;
+    }
+
+    if (!_aiService.isConfigured) {
+      final message =
+          'Online AI is not configured, and local model inference is not supported in this build. '
+          'I can still handle supported commands such as opening apps, back, and home. '
+          'Configure Gemini to interpret other requests.';
+      _addConversation(message, false);
+      _isAskingForFurtherHelp = true;
+      _statusMessage = _aiService.localModelStatus;
+      await _speakAndWait(message);
+      debugPrint(
+        'Lucy[$requestId] stage=total elapsed_ms=${requestTimer.elapsedMilliseconds}',
+      );
+      if (voiceInput && _isActive) _startListening();
+      return;
+    }
 
     if (_isAskingForFurtherHelp) {
       _isAskingForFurtherHelp = false;
@@ -324,16 +470,59 @@ class AgentController extends ChangeNotifier {
       }
     }
 
-    await _runAgentLoop(text);
+    await _runAgentLoop(text, requestId: requestId);
+    debugPrint(
+      'Lucy[$requestId] stage=total elapsed_ms=${requestTimer.elapsedMilliseconds}',
+    );
 
     // Resume listening after the loop completes
-    if (_isActive) {
+    if (voiceInput && _isActive) {
       _startListening();
     }
   }
 
+  Future<void> submitTextCommand(String text) async {
+    final command = text.trim();
+    if (command.isEmpty ||
+        (_state != AgentState.idle && _state != AgentState.listening)) {
+      return;
+    }
+    final resumeVoice = _isActive && _state == AgentState.listening;
+    if (resumeVoice) {
+      await _voiceService.stopListening();
+    } else {
+      _isActive = true;
+    }
+    await _handleUserInput(command, voiceInput: false);
+    if (_isActive && resumeVoice) {
+      _startListening();
+    } else if (_isActive) {
+      _isActive = false;
+      _setState(AgentState.idle);
+      _statusMessage = 'Manual command complete. Voice activation is off.';
+      notifyListeners();
+    }
+  }
+
+  void _scheduleFollowupTimeout() {
+    if (_followupTimeoutTimer != null) return;
+    _followupTimeoutTimer = Timer(_followupTimeout, () {
+      _followupTimeoutTimer = null;
+      if (_isActive && _isAskingForFurtherHelp) {
+        unawaited(
+          stopAgent(
+            statusMessage: 'Conversation timed out; microphone stopped.',
+          ),
+        );
+      }
+    });
+  }
+
   /// The core agent loop: capture → analyze → act → repeat.
-  Future<void> _runAgentLoop(String userMessage) async {
+  Future<void> _runAgentLoop(
+    String userMessage, {
+    String? requestId,
+  }) async {
     _cancelRequested = false;
     int step = 0;
     String currentMessage = userMessage;
@@ -354,8 +543,13 @@ class AgentController extends ChangeNotifier {
 
       final screenshotFuture = _captureScreenWithRetry();
       final uiSnapshotFuture = _fetchUiSnapshot();
+      final screenshotTimer = Stopwatch()..start();
+      final uiTimer = Stopwatch()..start();
 
       final screenshotBytes = await screenshotFuture;
+      debugPrint(
+        'Lucy[$requestId] stage=screen_capture elapsed_ms=${screenshotTimer.elapsedMilliseconds}',
+      );
       if (screenshotBytes != null) {
         _lastScreenshotBytes = screenshotBytes;
       }
@@ -364,6 +558,9 @@ class AgentController extends ChangeNotifier {
 
       // 1b. Fetch UI tree from accessibility service (runs in parallel-ready)
       final uiSnapshot = await uiSnapshotFuture;
+      debugPrint(
+        'Lucy[$requestId] stage=ui_snapshot elapsed_ms=${uiTimer.elapsedMilliseconds}',
+      );
       final uiTree = uiSnapshot?.rawTree;
 
       if (_cancelRequested) break;
@@ -373,11 +570,15 @@ class AgentController extends ChangeNotifier {
       _statusMessage = '🤖 Thinking... (step $step)';
       notifyListeners();
 
+      final inferenceTimer = Stopwatch()..start();
       final agentResponse = await _aiService.agentChat(
         currentMessage,
         imageBytes: screenshotBytes,
         screenSize: screenSize,
         uiTree: uiTree,
+      );
+      debugPrint(
+        'Lucy[$requestId] stage=ai_inference elapsed_ms=${inferenceTimer.elapsedMilliseconds}',
       );
 
       if (_cancelRequested) break;
@@ -394,9 +595,36 @@ class AgentController extends ChangeNotifier {
         );
       }
 
-      // Show AI response and action summary in conversation
       String speakText = agentResponse.speak;
-      if (agentResponse.done) {
+      if (_cancelRequested) break;
+
+      // 3. Execute actions
+      var actionsSucceeded = true;
+      if (agentResponse.actions.isNotEmpty) {
+        _setState(AgentState.executingAction);
+        _statusMessage = '⚡ Executing actions... (step $step)';
+        notifyListeners();
+
+        var latestSnapshot = uiSnapshot;
+        for (final action in agentResponse.actions) {
+          if (_cancelRequested) break;
+          final actionTimer = Stopwatch()..start();
+          final result = await _executeAction(action, latestSnapshot);
+          latestSnapshot = result.snapshot;
+          actionsSucceeded = actionsSucceeded && result.succeeded;
+          debugPrint(
+            'Lucy[$requestId] stage=action_${action.type} elapsed_ms=${actionTimer.elapsedMilliseconds}',
+          );
+        }
+      }
+
+      if (_cancelRequested) break;
+
+      if (!actionsSucceeded) {
+        speakText =
+            'I could not confirm that the requested Android action succeeded.';
+        _isAskingForFurtherHelp = true;
+      } else if (agentResponse.done) {
         if (speakText.isNotEmpty &&
             !speakText.endsWith(' ') &&
             !speakText.endsWith('\n')) {
@@ -423,43 +651,32 @@ class AgentController extends ChangeNotifier {
         _addConversation(displayText, false, screenshotBytes: screenshotBytes);
       }
 
-      if (_cancelRequested) break;
-
-      // 3. Execute actions
-      if (agentResponse.actions.isNotEmpty) {
-        _setState(AgentState.executingAction);
-        _statusMessage = '⚡ Executing actions... (step $step)';
-        notifyListeners();
-
-        var latestSnapshot = uiSnapshot;
-        for (final action in agentResponse.actions) {
-          if (_cancelRequested) break;
-          latestSnapshot = await _executeAction(action, latestSnapshot);
-        }
-      }
-
-      if (_cancelRequested) break;
-
       // 4. Speak the response (only speak if done or has something to say)
       if (speakText.isNotEmpty) {
+        _lastAssistantResponse = speakText;
         _setState(AgentState.speaking);
         _statusMessage = '🔊 Speaking...';
         notifyListeners();
 
         final ttsText = _trimForTts(speakText);
+        final speechTimer = Stopwatch()..start();
         await _voiceService.speak(ttsText, lang: _currentLang);
+        debugPrint(
+          'Lucy[$requestId] stage=tts_start elapsed_ms=${speechTimer.elapsedMilliseconds}',
+        );
 
         // Wait for TTS to finish
         await Future.delayed(const Duration(milliseconds: 500));
         while (_voiceService.isSpeaking && !_cancelRequested) {
           await Future.delayed(const Duration(milliseconds: 200));
         }
+
       }
 
       if (_cancelRequested) break;
 
       // 5. Check if done
-      if (agentResponse.done) {
+      if (agentResponse.done || !actionsSucceeded) {
         break;
       }
 
@@ -489,6 +706,86 @@ class AgentController extends ChangeNotifier {
     }
   }
 
+  Future<void> _handleLocalCommand(
+    LocalCommand command,
+    String requestId,
+  ) async {
+    switch (command.type) {
+      case LocalCommandType.stop:
+      case LocalCommandType.sleep:
+        final response = command.type == LocalCommandType.sleep
+            ? 'Okay, going to sleep.'
+            : 'Okay, stopping voice listening.';
+        _addConversation(response, false);
+        await _speakAndWait(response);
+        await stopAgent();
+        return;
+      case LocalCommandType.cancel:
+        _cancelRequested = true;
+        const response = 'Cancelled.';
+        _addConversation(response, false);
+        await _speakAndWait(response);
+        return;
+      case LocalCommandType.repeat:
+        final previous = _lastAssistantResponse;
+        if (previous == null) {
+          const response = 'There is nothing to repeat yet.';
+          _addConversation(response, false);
+          await _speakAndWait(response);
+          return;
+        }
+        await _speakAndWait(previous);
+        return;
+      case LocalCommandType.action:
+        final action = command.action!;
+        _setState(AgentState.executingAction);
+        _statusMessage = 'Executing local command...';
+        notifyListeners();
+        final timer = Stopwatch()..start();
+        bool success;
+        switch (action.type) {
+          case 'open_app':
+            success = await _screenCapture.openApp(
+              action.params['package'] as String,
+            );
+            break;
+          case 'back':
+            success = await _screenCapture.pressBack();
+            break;
+          case 'home':
+            success = await _screenCapture.pressHome();
+            break;
+          default:
+            success = false;
+            break;
+        }
+        debugPrint(
+          'Lucy[$requestId] stage=fast_action_${action.type} elapsed_ms=${timer.elapsedMilliseconds} success=$success',
+        );
+        final response = success
+            ? switch (action.type) {
+                'open_app' => 'Opened ${command.label ?? 'the app'}.',
+                'back' => 'Went back.',
+                'home' => 'Went to the home screen.',
+                _ => 'Command completed.',
+              }
+            : 'I could not complete that command. Check that the required Android permissions are enabled.';
+        _addConversation(response, false);
+        _isAskingForFurtherHelp = true;
+        await _speakAndWait(response);
+        return;
+    }
+  }
+
+  Future<void> _speakAndWait(String text) async {
+    _lastAssistantResponse = text;
+    _setState(AgentState.speaking);
+    await _voiceService.speak(text, lang: _currentLang);
+    while (_voiceService.isSpeaking && _isActive) {
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+  }
+
   /// Capture the screen with retry logic.
   /// After navigating to another app, the first capture attempt may return null
   /// because the VirtualDisplay hasn't rendered a fresh frame yet. Retrying
@@ -505,6 +802,7 @@ class AgentController extends ChangeNotifier {
         // Increasing delay between retries: 200ms, 400ms
         await Future.delayed(Duration(milliseconds: 200 * (i + 1)));
       }
+
     }
     print('All $maxRetries screenshot capture attempts failed');
     return null;
@@ -717,7 +1015,7 @@ class AgentController extends ChangeNotifier {
   }
 
   /// Execute a single agent action.
-  Future<_UiSnapshot?> _executeAction(
+  Future<_ActionExecutionResult> _executeAction(
     AgentAction action,
     _UiSnapshot? beforeSnapshot,
   ) async {
@@ -732,53 +1030,40 @@ class AgentController extends ChangeNotifier {
           'Please enable it in Settings → Accessibility → Lucy.',
           false,
         );
-        return beforeSnapshot;
+        return _ActionExecutionResult(beforeSnapshot, false);
       }
     }
 
+    var succeeded = false;
     try {
       switch (action.type) {
         case 'open_app':
           final package = action.params['package'] as String? ?? '';
           if (package.isNotEmpty) {
-            final success = await _screenCapture.openApp(package);
-            if (!success) {
-              print('Failed to open app: $package');
-            }
+            succeeded = await _screenCapture.openApp(package);
           }
           break;
 
         case 'tap':
-          double x, y;
-          // Prefer element-based tap (resolve coordinates from UI tree)
           final elementId = action.params['element'] as num?;
-          if (elementId != null) {
-            final coords = _resolveElementCoordinates(
-              elementId.toInt(),
-              beforeSnapshot?.elements ?? const [],
+          final coords = elementId == null
+              ? null
+              : _resolveElementCoordinates(
+                  elementId.toInt(),
+                  beforeSnapshot?.elements ?? const [],
+                );
+          if (coords != null) {
+            succeeded = await _screenCapture.performTap(
+              coords['x']!,
+              coords['y']!,
             );
-            if (coords != null) {
-              x = coords['x']!;
-              y = coords['y']!;
-            } else {
-              print(
-                'Element $elementId not found in UI tree, falling back to raw coordinates',
-              );
-              x = (action.params['x'] as num?)?.toDouble() ?? 0;
-              y = (action.params['y'] as num?)?.toDouble() ?? 0;
-            }
-          } else {
-            // Fallback to raw coordinates if LLM still provides them
-            x = (action.params['x'] as num?)?.toDouble() ?? 0;
-            y = (action.params['y'] as num?)?.toDouble() ?? 0;
           }
-          await _screenCapture.performTap(x, y);
           break;
 
         case 'type':
           final text = action.params['text'] as String? ?? '';
           if (text.isNotEmpty) {
-            await _screenCapture.performType(text);
+            succeeded = await _screenCapture.performType(text);
           }
           break;
 
@@ -787,18 +1072,24 @@ class AgentController extends ChangeNotifier {
           final startY = (action.params['startY'] as num?)?.toDouble() ?? 0;
           final endX = (action.params['endX'] as num?)?.toDouble() ?? 0;
           final endY = (action.params['endY'] as num?)?.toDouble() ?? 0;
-          await _screenCapture.performSwipe(startX, startY, endX, endY);
+          succeeded = await _screenCapture.performSwipe(
+            startX,
+            startY,
+            endX,
+            endY,
+          );
           break;
 
         case 'back':
-          await _screenCapture.pressBack();
+          succeeded = await _screenCapture.pressBack();
           break;
 
         case 'home':
-          await _screenCapture.pressHome();
+          succeeded = await _screenCapture.pressHome();
           break;
 
         case 'wait':
+          succeeded = true;
           break;
 
         default:
@@ -808,7 +1099,10 @@ class AgentController extends ChangeNotifier {
       print('Error executing action ${action.type}: $e');
     }
 
-    return _waitForActionReadiness(action, beforeSnapshot);
+    final snapshot = succeeded
+        ? await _waitForActionReadiness(action, beforeSnapshot)
+        : beforeSnapshot;
+    return _ActionExecutionResult(snapshot, succeeded);
   }
 
   String _trimForTts(String text) {
@@ -850,7 +1144,30 @@ class AgentController extends ChangeNotifier {
         screenshotBytes: screenshotBytes,
       ),
     );
+    if (_conversation.length > _maxHistoryEntries) {
+      _conversation.removeRange(0, _conversation.length - _maxHistoryEntries);
+    }
+    _historyWrite = _historyWrite.then((_) => _persistConversation());
+    unawaited(_historyWrite);
     notifyListeners();
+  }
+
+  Future<void> _persistConversation() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final entries = _conversation
+          .map(
+            (entry) => jsonEncode({
+              'text': entry.text,
+              'isUser': entry.isUser,
+              'timestamp': entry.timestamp.toIso8601String(),
+            }),
+          )
+          .toList(growable: false);
+      await prefs.setStringList(_historyPrefKey, entries);
+    } catch (error) {
+      debugPrint('Could not save conversation history: $error');
+    }
   }
 
   void clearConversation() {
@@ -858,11 +1175,14 @@ class AgentController extends ChangeNotifier {
     _lastScreenshotBytes = null;
     _isAskingForFurtherHelp = false;
     _aiService.resetChat();
+    _historyWrite = _historyWrite.then((_) => _persistConversation());
+    unawaited(_historyWrite);
     notifyListeners();
   }
 
   @override
   void dispose() {
+    _followupTimeoutTimer?.cancel();
     _voiceService.dispose();
     super.dispose();
   }

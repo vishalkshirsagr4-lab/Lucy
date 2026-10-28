@@ -30,22 +30,104 @@ class AgentResponse {
   });
 
   factory AgentResponse.fromJson(Map<String, dynamic> json, String raw) {
-    final actionsList = (json['actions'] as List<dynamic>? ?? [])
-        .map(
-          (a) => AgentAction(
-            type: a['type'] as String? ?? 'wait',
-            params: Map<String, dynamic>.from(a as Map)..remove('type'),
-          ),
-        )
-        .toList();
+    const responseKeys = {'actions', 'speak', 'done', 'lang'};
+    if (json.keys.any((key) => !responseKeys.contains(key))) {
+      throw const FormatException('Unexpected response field');
+    }
+    final actionsValue = json['actions'];
+    if (actionsValue is! List || actionsValue.length > 1) {
+      throw const FormatException('Expected zero or one action');
+    }
+    final actionsList = actionsValue.map(_parseAction).toList();
+    final speak = json['speak'];
+    final done = json['done'];
+    final lang = json['lang'];
+    if (speak is! String ||
+        speak.length > 2000 ||
+        done is! bool ||
+        lang is! String ||
+        lang.length > 12) {
+      throw const FormatException('Invalid response fields');
+    }
 
     return AgentResponse(
       actions: actionsList,
-      speak: json['speak'] as String? ?? '',
-      done: json['done'] as bool? ?? true,
-      lang: (json['lang'] as String? ?? '').toLowerCase(),
+      speak: speak,
+      done: done,
+      lang: lang.toLowerCase(),
       rawResponse: raw,
     );
+  }
+
+  static AgentAction _parseAction(dynamic value) {
+    if (value is! Map) {
+      throw const FormatException('Action must be an object');
+    }
+    final action = Map<String, dynamic>.from(value);
+    final type = action.remove('type');
+    if (type is! String) {
+      throw const FormatException('Action type is required');
+    }
+
+    bool hasOnly(Set<String> allowed) => action.keys.every(allowed.contains);
+
+    switch (type) {
+      case 'open_app':
+        final package = action['package'];
+        if (!hasOnly({'package'}) ||
+            package is! String ||
+            !RegExp(r'^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)+$').hasMatch(package)) {
+          throw const FormatException('Invalid open_app parameters');
+        }
+        break;
+      case 'tap':
+        final element = action['element'];
+        if (!hasOnly({'element'}) || element is! int || element < 0) {
+          throw const FormatException('Invalid tap parameters');
+        }
+        break;
+      case 'type':
+        final text = action['text'];
+        if (!hasOnly({'text'}) ||
+            text is! String ||
+            text.isEmpty ||
+            text.length > 2000) {
+          throw const FormatException('Invalid type parameters');
+        }
+        break;
+      case 'swipe':
+        const coordinates = {'startX', 'startY', 'endX', 'endY'};
+        if (action.keys.toSet().difference(coordinates).isNotEmpty ||
+            action.keys.toSet().length != coordinates.length ||
+            action.values.any(
+              (value) =>
+                  value is! num ||
+                  !value.isFinite ||
+                  value < 0 ||
+                  value > 10000,
+            )) {
+          throw const FormatException('Invalid swipe parameters');
+        }
+        break;
+      case 'wait':
+        final milliseconds = action['ms'];
+        if (!hasOnly({'ms'}) ||
+            milliseconds is! int ||
+            milliseconds < 0 ||
+            milliseconds > 10000) {
+          throw const FormatException('Invalid wait parameters');
+        }
+        break;
+      case 'back':
+      case 'home':
+        if (action.isNotEmpty) {
+          throw const FormatException('Navigation actions take no parameters');
+        }
+        break;
+      default:
+        throw FormatException('Unsupported action type: $type');
+    }
+    return AgentAction(type: type, params: action);
   }
 
   factory AgentResponse.fallback(String raw) {
@@ -65,6 +147,9 @@ class AiService {
   String? _apiKey;
 
   bool get isConfigured => _apiKey != null && _apiKey!.isNotEmpty;
+  bool get localModelAvailable => false;
+  String get localModelStatus =>
+      'No local GGUF inference engine is installed in this build.';
 
   static const _systemPrompt = '''
 You are an autonomous AI agent controlling an Android phone. You receive TWO sources of information each step:
@@ -199,14 +284,17 @@ RESPONSE FORMAT (strict JSON, one action only):
       final response = await _chat!.sendMessage(content);
       final text = response.text ?? '{}';
 
-      return _parseAgentResponse(text);
+      return parseAgentResponse(text, screenSize: screenSize);
     } catch (e) {
       return AgentResponse.fallback('Error: ${e.toString()}');
     }
   }
 
   /// Parse the AI's JSON response into an AgentResponse.
-  AgentResponse _parseAgentResponse(String text) {
+  static AgentResponse parseAgentResponse(
+    String text, {
+    Map<String, int>? screenSize,
+  }) {
     try {
       // Try to extract JSON from the response
       String jsonStr = text.trim();
@@ -221,10 +309,47 @@ RESPONSE FORMAT (strict JSON, one action only):
       }
 
       final json = jsonDecode(jsonStr) as Map<String, dynamic>;
-      return AgentResponse.fromJson(json, text);
-    } catch (e) {
-      // If JSON parsing fails, treat the whole response as a spoken message
-      return AgentResponse.fallback(text);
+      final response = AgentResponse.fromJson(json, text);
+      _validateScreenBounds(response, screenSize);
+      return response;
+    } on FormatException {
+      return AgentResponse.fallback(
+        'I could not validate the AI response, so I did not perform an action.',
+      );
+    } catch (_) {
+      return AgentResponse.fallback(
+        'I could not validate the AI response, so I did not perform an action.',
+      );
+    }
+  }
+
+  static void _validateScreenBounds(
+    AgentResponse response,
+    Map<String, int>? screenSize,
+  ) {
+    if (response.actions.isEmpty || response.actions.single.type != 'swipe') {
+      return;
+    }
+    if (screenSize == null) {
+      throw const FormatException('Screen dimensions are unavailable');
+    }
+    final width = screenSize['width'];
+    final height = screenSize['height'];
+    if (width == null || height == null || width <= 0 || height <= 0) {
+      throw const FormatException('Invalid screen dimensions');
+    }
+    final action = response.actions.single;
+    final coordinates = [
+      action.params['startX'],
+      action.params['endX'],
+    ];
+    final verticalCoordinates = [
+      action.params['startY'],
+      action.params['endY'],
+    ];
+    if (coordinates.any((value) => (value as num) >= width) ||
+        verticalCoordinates.any((value) => (value as num) >= height)) {
+      throw const FormatException('Swipe coordinates exceed screen bounds');
     }
   }
 

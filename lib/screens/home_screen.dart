@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../services/agent_controller.dart';
+import 'settings_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   final AgentController controller;
@@ -17,6 +17,8 @@ class _HomeScreenState extends State<HomeScreen>
   late Animation<double> _pulseAnimation;
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _apiKeyController = TextEditingController();
+  final TextEditingController _manualCommandController =
+      TextEditingController();
 
   bool _isAccessibilityEnabled = false;
   bool _isCheckingAccessibility = true;
@@ -35,8 +37,6 @@ class _HomeScreenState extends State<HomeScreen>
     );
 
     widget.controller.addListener(_onControllerUpdate);
-    _loadApiKey();
-
     _checkAccessibility();
   }
 
@@ -61,21 +61,6 @@ class _HomeScreenState extends State<HomeScreen>
         _isCheckingAccessibility = false;
       });
     }
-  }
-
-  Future<void> _loadApiKey() async {
-    final prefs = await SharedPreferences.getInstance();
-    final key = prefs.getString('gemini_api_key');
-    if (key != null && key.isNotEmpty) {
-      _apiKeyController.text = key;
-      widget.controller.configureAi(key);
-    }
-  }
-
-  Future<void> _saveApiKey(String key) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('gemini_api_key', key);
-    widget.controller.configureAi(key);
   }
 
   void _onControllerUpdate() {
@@ -106,6 +91,7 @@ class _HomeScreenState extends State<HomeScreen>
     _pulseController.dispose();
     _scrollController.dispose();
     _apiKeyController.dispose();
+    _manualCommandController.dispose();
     widget.controller.removeListener(_onControllerUpdate);
     super.dispose();
   }
@@ -118,66 +104,6 @@ class _HomeScreenState extends State<HomeScreen>
       return Scaffold(
         backgroundColor: colorScheme.surface,
         body: const Center(child: CircularProgressIndicator()),
-      );
-    }
-
-    if (!_isAccessibilityEnabled) {
-      return Scaffold(
-        backgroundColor: colorScheme.surface,
-        appBar: AppBar(
-          title: const Text('Access Required'),
-          backgroundColor: colorScheme.surface,
-          elevation: 0,
-        ),
-        body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(32),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  Icons.accessibility_new,
-                  size: 72,
-                  color: colorScheme.primary,
-                ),
-                const SizedBox(height: 24),
-                Text(
-                  'Accessibility Required',
-                  style: TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                    color: colorScheme.onSurface,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  'To use this app, you must enable the Lucy accessibility service.\n\n'
-                  'Go to Settings → Accessibility → Lucy → Enable',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 16,
-                    color: colorScheme.onSurface.withOpacity(0.7),
-                    height: 1.5,
-                  ),
-                ),
-                const SizedBox(height: 32),
-                FilledButton.icon(
-                  onPressed: () => widget.controller.screenCapture
-                      .openAccessibilitySettings(),
-                  icon: const Icon(Icons.settings),
-                  label: const Text('Open Settings'),
-                  style: FilledButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 32,
-                      vertical: 16,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
       );
     }
 
@@ -214,6 +140,16 @@ class _HomeScreenState extends State<HomeScreen>
         actions: [
           _buildLanguageToggle(),
           IconButton(
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: 'Settings',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) =>
+                    SettingsScreen(controller: widget.controller),
+              ),
+            ),
+          ),
+          IconButton(
             icon: const Icon(Icons.key),
             tooltip: 'API Key',
             onPressed: () => _showApiKeyDialog(context),
@@ -230,6 +166,7 @@ class _HomeScreenState extends State<HomeScreen>
         children: [
           // Status bar
           _buildStatusBar(colorScheme),
+          _buildCapabilitySummary(colorScheme),
 
           // Conversation list
           Expanded(
@@ -242,11 +179,104 @@ class _HomeScreenState extends State<HomeScreen>
           if (widget.controller.currentTranscript?.isNotEmpty == true)
             _buildTranscriptBar(colorScheme),
 
+          _buildManualCommandInput(),
+
           // Bottom bar with mic button
           _buildBottomBar(colorScheme),
         ],
       ),
     );
+  }
+
+  Widget _buildCapabilitySummary(ColorScheme colorScheme) {
+    final controller = widget.controller;
+    final statuses = <(String, String)>[
+      (
+        'AI',
+        controller.aiService.isConfigured ? 'Gemini online' : 'No provider',
+      ),
+      ('Local AI', 'Unavailable'),
+      (
+        'Speech',
+        controller.speechRecognitionReady
+            ? 'Device recognizer'
+            : 'Unavailable',
+      ),
+      ('Microphone', controller.microphoneStatus),
+      ('Wake word', 'Unavailable'),
+      ('Background', 'Manual only'),
+      ('Internet', controller.aiService.isConfigured ? 'Required for Gemini' : 'Not measured'),
+      ('Accessibility', _isAccessibilityEnabled ? 'Enabled' : 'Not enabled'),
+      (
+        'Screen capture',
+        controller.screenCapture.hasPermission ? 'Granted' : 'Not granted',
+      ),
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: statuses
+                .map(
+                  (status) => Chip(
+                    visualDensity: VisualDensity.compact,
+                    label: Text('${status.$1}: ${status.$2}'),
+                    backgroundColor: colorScheme.surfaceContainerHighest,
+                  ),
+                )
+                .toList(),
+          ),
+        ),
+        if (!_isAccessibilityEnabled)
+          Padding(
+            padding: const EdgeInsets.only(left: 12, bottom: 4),
+            child: TextButton.icon(
+              onPressed: widget.controller.screenCapture.openAccessibilitySettings,
+              icon: const Icon(Icons.accessibility_new),
+              label: const Text('Enable accessibility for UI automation'),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildManualCommandInput() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _manualCommandController,
+              textInputAction: TextInputAction.send,
+              onSubmitted: (_) => _submitManualCommand(),
+              decoration: const InputDecoration(
+                hintText: 'Type a command',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          IconButton.filled(
+            tooltip: 'Send command',
+            onPressed: _submitManualCommand,
+            icon: const Icon(Icons.send),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _submitManualCommand() async {
+    final command = _manualCommandController.text.trim();
+    if (command.isEmpty) return;
+    _manualCommandController.clear();
+    await widget.controller.submitTextCommand(command);
   }
 
   Widget _buildStatusBar(ColorScheme colorScheme) {
@@ -279,7 +309,7 @@ class _HomeScreenState extends State<HomeScreen>
               onPressed: () => _showApiKeyDialog(context),
               icon: Icon(Icons.warning_amber, size: 16, color: Colors.amber),
               label: Text(
-                'Set API Key',
+                'Configure online AI',
                 style: TextStyle(color: Colors.amber, fontSize: 12),
               ),
             ),
@@ -299,6 +329,12 @@ class _HomeScreenState extends State<HomeScreen>
               Icons.visibility,
               size: 72,
               color: colorScheme.primary.withOpacity(0.4),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Say a command while listening, or type one below.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: colorScheme.onSurfaceVariant),
             ),
           ],
         ),
@@ -610,7 +646,10 @@ class _HomeScreenState extends State<HomeScreen>
           mainAxisSize: MainAxisSize.min,
           children: [
             const Text(
-              'Enter your Google Gemini API key to enable real AI vision analysis.',
+              'Enter a Gemini API key only if you want to send requests and screen content to Google Gemini. '
+              'This is optional; deterministic local commands work without it. '
+              'The key is kept in memory for this app session and is not saved. '
+              'A local GGUF inference engine is not available in this build.',
               style: TextStyle(fontSize: 13),
             ),
             const SizedBox(height: 16),
@@ -634,7 +673,8 @@ class _HomeScreenState extends State<HomeScreen>
             onPressed: () {
               final key = _apiKeyController.text.trim();
               if (key.isNotEmpty) {
-                _saveApiKey(key);
+                widget.controller.configureAi(key);
+                _apiKeyController.clear();
               }
               Navigator.pop(ctx);
             },
