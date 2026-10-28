@@ -184,7 +184,8 @@ class AgentController extends ChangeNotifier {
       : 'Not active; Android permission is requested when voice starts';
   double get speechRate => _voiceService.speechRate;
   Duration get followupTimeout => _followupTimeout;
-  String get wakeWordStatus => 'Unavailable: no offline wake-word engine installed';
+  String get wakeWordStatus =>
+      'Unavailable: no offline wake-word engine installed';
   String get backgroundListeningStatus =>
       'Unavailable: voice input is manual and stops outside the active app session';
 
@@ -324,7 +325,8 @@ class AgentController extends ChangeNotifier {
       'Manual voice listening started. Lucy does not listen for a wake phrase in the background.',
       false,
     );
-    _statusMessage = 'Manual listening is active in Lucy. Tap the button to stop.';
+    _statusMessage =
+        'Manual listening is active in Lucy. Tap the button to stop.';
     _isAskingForFurtherHelp = false;
     notifyListeners();
 
@@ -390,10 +392,7 @@ class AgentController extends ChangeNotifier {
   }
 
   /// Main handler: user says something → agent loop begins.
-  Future<void> _handleUserInput(
-    String text, {
-    bool voiceInput = true,
-  }) async {
+  Future<void> _handleUserInput(String text, {bool voiceInput = true}) async {
     if (!_isActive ||
         (voiceInput && _state != AgentState.listening) ||
         (!voiceInput &&
@@ -519,10 +518,7 @@ class AgentController extends ChangeNotifier {
   }
 
   /// The core agent loop: capture → analyze → act → repeat.
-  Future<void> _runAgentLoop(
-    String userMessage, {
-    String? requestId,
-  }) async {
+  Future<void> _runAgentLoop(String userMessage, {String? requestId}) async {
     _cancelRequested = false;
     int step = 0;
     String currentMessage = userMessage;
@@ -670,7 +666,6 @@ class AgentController extends ChangeNotifier {
         while (_voiceService.isSpeaking && !_cancelRequested) {
           await Future.delayed(const Duration(milliseconds: 200));
         }
-
       }
 
       if (_cancelRequested) break;
@@ -802,7 +797,6 @@ class AgentController extends ChangeNotifier {
         // Increasing delay between retries: 200ms, 400ms
         await Future.delayed(Duration(milliseconds: 200 * (i + 1)));
       }
-
     }
     print('All $maxRetries screenshot capture attempts failed');
     return null;

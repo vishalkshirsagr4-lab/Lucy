@@ -339,10 +339,7 @@ RESPONSE FORMAT (strict JSON, one action only):
       throw const FormatException('Invalid screen dimensions');
     }
     final action = response.actions.single;
-    final coordinates = [
-      action.params['startX'],
-      action.params['endX'],
-    ];
+    final coordinates = [action.params['startX'], action.params['endX']];
     final verticalCoordinates = [
       action.params['startY'],
       action.params['endY'],

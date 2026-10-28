@@ -4,15 +4,18 @@ import 'package:screen_aware_ai/services/command_router.dart';
 void main() {
   const router = LocalCommandRouter();
 
-  test('routes exact navigation and app commands without substring matches', () {
-    expect(router.route('Go back')?.action?.type, 'back');
-    expect(
-      router.route('OPEN YouTube!')?.action?.params['package'],
-      'com.google.android.youtube',
-    );
-    expect(router.route('Please open YouTube'), isNull);
-    expect(router.route('open an unknown application'), isNull);
-  });
+  test(
+    'routes exact navigation and app commands without substring matches',
+    () {
+      expect(router.route('Go back')?.action?.type, 'back');
+      expect(
+        router.route('OPEN YouTube!')?.action?.params['package'],
+        'com.google.android.youtube',
+      );
+      expect(router.route('Please open YouTube'), isNull);
+      expect(router.route('open an unknown application'), isNull);
+    },
+  );
 
   test('routes listening controls distinctly', () {
     expect(router.route('stop listening')?.type, LocalCommandType.stop);

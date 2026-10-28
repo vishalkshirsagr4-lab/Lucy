@@ -76,10 +76,7 @@ class LocalCommandRouter {
         if (package == null) return null;
         return LocalCommand(
           LocalCommandType.action,
-          action: AgentAction(
-            type: 'open_app',
-            params: {'package': package},
-          ),
+          action: AgentAction(type: 'open_app', params: {'package': package}),
           label: app,
         );
       }

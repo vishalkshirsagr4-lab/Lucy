@@ -13,7 +13,9 @@ void main() {
 
   test('parses a validated action response', () {
     final response = AiService.parseAgentResponse(
-      jsonEncode(responseWith({'type': 'open_app', 'package': 'com.example.app'})),
+      jsonEncode(
+        responseWith({'type': 'open_app', 'package': 'com.example.app'}),
+      ),
     );
 
     expect(response.actions.single.type, 'open_app');
