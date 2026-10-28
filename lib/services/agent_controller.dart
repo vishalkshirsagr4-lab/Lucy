@@ -207,6 +207,12 @@ class AgentController extends ChangeNotifier {
     }
 
     final savedSpeechRate = prefs.getDouble('lucy_speech_rate');
+    if (savedSpeechRate != null &&
+        savedSpeechRate >= 0.1 &&
+        savedSpeechRate <= 1.0) {
+      await _voiceService.setSpeechRate(savedSpeechRate);
+    }
+
     final savedTimeoutSeconds = prefs.getInt('lucy_followup_timeout_seconds');
     if (savedTimeoutSeconds != null &&
         savedTimeoutSeconds >= 15 &&
