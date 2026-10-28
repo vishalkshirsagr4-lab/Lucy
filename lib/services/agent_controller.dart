@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'ai_service.dart';
+import 'local_model_service.dart';
 import 'command_router.dart';
 import 'voice_service.dart';
 import 'screen_capture_service.dart';
@@ -56,6 +57,7 @@ class _ActionExecutionResult {
 
 class AgentController extends ChangeNotifier {
   final AiService _aiService = AiService();
+  final LocalModelService _localModelService = LocalModelService();
   final VoiceService _voiceService = VoiceService();
   final ScreenCaptureManager _screenCapture = ScreenCaptureManager();
   final LocalCommandRouter _commandRouter = LocalCommandRouter();
@@ -177,6 +179,7 @@ class AgentController extends ChangeNotifier {
   );
 
   AiService get aiService => _aiService;
+  LocalModelService get localModelService => _localModelService;
   ScreenCaptureManager get screenCapture => _screenCapture;
   bool get speechRecognitionReady => _isVoiceReady;
   String get microphoneStatus => _voiceService.isListening
@@ -1184,6 +1187,7 @@ class AgentController extends ChangeNotifier {
   void dispose() {
     _followupTimeoutTimer?.cancel();
     _voiceService.dispose();
+    _localModelService.dispose();
     super.dispose();
   }
 }

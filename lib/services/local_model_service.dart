@@ -1,0 +1,176 @@
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
+import 'package:llama_flutter_android/llama_flutter_android.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+class LocalModelService extends ChangeNotifier {
+  final LlamaController _llama = LlamaController();
+
+  static const _savedModelKey = 'lucy_local_model_path';
+
+  String? _modelPath;
+  bool _loading = false;
+  bool _generating = false;
+  bool _disposed = false;
+  String _status = 'Choose a GGUF model to begin.';
+  String _lastResponse = '';
+
+  String get status => _status;
+  String get lastResponse => _lastResponse;
+  String? get modelPath => _modelPath;
+  bool get isLoading => _loading;
+  bool get isGenerating => _generating;
+  bool get isReady => _modelPath != null && !_loading;
+
+  void _updateStatus(String value) {
+    _status = value;
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<void> restoreSavedModelPath() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString(_savedModelKey);
+
+    if (saved != null && await File(saved).exists()) {
+      _modelPath = saved;
+      _updateStatus('Model selected. Tap Load model to initialize it.');
+    }
+  }
+
+  Future<void> chooseModel() async {
+    if (_loading || _generating) return;
+
+    try {
+      final files = await FilePicker.pickFiles(
+        dialogTitle: 'Choose Lucy GGUF model',
+        type: FileType.custom,
+        allowedExtensions: ['gguf'],
+      );
+
+      if (files.isEmpty) {
+        _updateStatus('Model selection cancelled.');
+        return;
+      }
+
+      final selected = files.first;
+      final source = selected.xFile;
+
+      _updateStatus('Copying ${selected.name} into Lucy storage...');
+
+      final directory = await getApplicationSupportDirectory();
+      final modelsDirectory = Directory('${directory.path}/models');
+      await modelsDirectory.create(recursive: true);
+
+      final destination = File('${modelsDirectory.path}/${selected.name}');
+      final temporary = File('${destination.path}.copying');
+
+      if (await temporary.exists()) {
+        await temporary.delete();
+      }
+
+      final sink = temporary.openWrite();
+
+      try {
+        await for (final chunk in source.openRead()) {
+          sink.add(chunk);
+        }
+        await sink.flush();
+        await sink.close();
+      } catch (_) {
+        await sink.close();
+        if (await temporary.exists()) await temporary.delete();
+        rethrow;
+      }
+
+      if (await destination.exists()) {
+        await destination.delete();
+      }
+      await temporary.rename(destination.path);
+
+      _modelPath = destination.path;
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_savedModelKey, _modelPath!);
+
+      _updateStatus(
+        'Model copied: ${selected.name}. Tap Load model to initialize it.',
+      );
+    } catch (error) {
+      _updateStatus('Could not copy model: $error');
+    }
+  }
+
+  Future<void> loadModel() async {
+    if (_loading || _generating) return;
+
+    final path = _modelPath;
+    if (path == null || !await File(path).exists()) {
+      _updateStatus('Choose a valid GGUF model first.');
+      return;
+    }
+
+    _loading = true;
+    _updateStatus('Loading model. This may take a while...');
+
+    try {
+      await _llama.loadModel(
+        modelPath: path,
+        threads: 4,
+        contextSize: 2048,
+        gpuLayers: 0,
+      );
+
+      _updateStatus('Model loaded. Ready for an offline text test.');
+    } catch (error) {
+      _updateStatus('Model loading failed: $error');
+    } finally {
+      _loading = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  Future<String> testPrompt(String prompt) async {
+    if (_loading || _generating) {
+      return 'Lucy is busy. Please wait.';
+    }
+
+    if (!await _llama.isModelLoaded()) {
+      _updateStatus('Load the model before testing it.');
+      return 'No local model loaded.';
+    }
+
+    _generating = true;
+    _lastResponse = '';
+    _updateStatus('Generating response offline...');
+
+    try {
+      await for (final token in _llama.generate(
+        prompt: prompt,
+        maxTokens: 160,
+        temperature: 0.7,
+      )) {
+        _lastResponse += token;
+        if (!_disposed) notifyListeners();
+      }
+
+      _updateStatus('Offline response complete.');
+      return _lastResponse;
+    } catch (error) {
+      _updateStatus('Generation failed: $error');
+      return 'Local generation failed: $error';
+    } finally {
+      _generating = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _llama.dispose();
+    super.dispose();
+  }
+}
