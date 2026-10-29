@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'ai_service.dart';
 import 'command_router.dart';
+import 'local_model_service.dart';
 import 'voice_service.dart';
 import 'screen_capture_service.dart';
 
@@ -54,11 +56,17 @@ class _ActionExecutionResult {
   final bool succeeded;
 }
 
-class AgentController extends ChangeNotifier {
-  final AiService _aiService = AiService();
+class AgentController extends ChangeNotifier with WidgetsBindingObserver {
+  AgentController() {
+    WidgetsBinding.instance.addObserver(this);
+    _localModel.addListener(_onLocalModelChanged);
+  }
+
   final VoiceService _voiceService = VoiceService();
   final ScreenCaptureManager _screenCapture = ScreenCaptureManager();
   final LocalCommandRouter _commandRouter = LocalCommandRouter();
+  late final LocalModelService _localModel = LocalModelService(_screenCapture);
+  late final AiService _aiService = AiService(_localModel);
 
   AgentState _state = AgentState.idle;
   AgentState get state => _state;
@@ -82,7 +90,8 @@ class AgentController extends ChangeNotifier {
   int _listenRetryCount = 0;
   static const int _maxListenRetries = 3;
 
-  static const int _maxStepsPerCommand = 50;
+  static const int _maxStepsPerCommand = 12;
+  static const Duration _maxTaskDuration = Duration(minutes: 2);
   static const Duration _uiPollInterval = Duration(milliseconds: 120);
   static const Duration _tapReadyTimeout = Duration(milliseconds: 900);
   static const Duration _typeReadyTimeout = Duration(milliseconds: 900);
@@ -93,6 +102,7 @@ class AgentController extends ChangeNotifier {
 
   bool _isAskingForFurtherHelp = false;
   String? _lastAssistantResponse;
+  String _streamingStatus = '';
   int _requestSequence = 0;
   bool _isVoiceReady = false;
   Timer? _followupTimeoutTimer;
@@ -177,6 +187,7 @@ class AgentController extends ChangeNotifier {
   );
 
   AiService get aiService => _aiService;
+  LocalModelService get localModel => _localModel;
   ScreenCaptureManager get screenCapture => _screenCapture;
   bool get speechRecognitionReady => _isVoiceReady;
   String get microphoneStatus => _voiceService.isListening
@@ -195,11 +206,46 @@ class AgentController extends ChangeNotifier {
   /// Force-stop the current agent loop immediately.
   void requestCancel() {
     _cancelRequested = true;
+    _aiService.cancelLocalGeneration();
     _voiceService.stopSpeaking();
     notifyListeners();
   }
 
+  Future<bool> selectLocalModel() async => _localModel.selectModel();
+  Future<void> loadLocalModel() => _localModel.loadModel();
+  Future<void> unloadLocalModel() => _localModel.unloadModel();
+  Future<void> setProviderMode(AiProviderMode mode) =>
+      _aiService.setProviderMode(mode);
+  Future<void> setCloudFallbackEnabled(bool enabled) =>
+      _aiService.setCloudFallbackEnabled(enabled);
+  Future<void> setAllowGeminiData(bool enabled) =>
+      _aiService.setAllowGeminiData(enabled);
+
+  void _onLocalModelChanged() => notifyListeners();
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      _cancelForBackground();
+    }
+  }
+
+  @override
+  void didHaveMemoryPressure() => _cancelForBackground();
+
+  void _cancelForBackground() {
+    if (_isActive) requestCancel();
+    unawaited(_voiceService.stopListening());
+    if (_localModel.state == LocalModelState.ready ||
+        _localModel.state == LocalModelState.generating ||
+        _localModel.state == LocalModelState.inferenceFailed) {
+      unawaited(_localModel.unloadModel().catchError((_) {}));
+    }
+  }
+
   Future<void> initialize() async {
+    await _aiService.initialize();
     final prefs = await SharedPreferences.getInstance();
     final savedLang = prefs.getString(_langPrefKey);
     if (savedLang != null && _supportedLangs.contains(savedLang)) {
@@ -432,11 +478,10 @@ class AgentController extends ChangeNotifier {
       return;
     }
 
-    if (!_aiService.isConfigured) {
+    if (!_aiService.canInterpretRequests) {
       final message =
-          'Online AI is not configured, and local model inference is not supported in this build. '
-          'I can still handle supported commands such as opening apps, back, and home. '
-          'Configure Gemini to interpret other requests.';
+          'No selected AI provider can handle this request. Supported exact local commands still work. '
+          'Load a GGUF model for offline interpretation, or enable Gemini and cloud data consent in Settings.';
       _addConversation(message, false);
       _isAskingForFurtherHelp = true;
       _statusMessage = _aiService.localModelStatus;
@@ -529,6 +574,8 @@ class AgentController extends ChangeNotifier {
     _cancelRequested = false;
     int step = 0;
     String currentMessage = userMessage;
+    bool taskCompleted = false;
+    final taskTimer = Stopwatch()..start();
 
     // Show persistent stop notification while Lucy is active
     await _screenCapture.showStopOverlay();
@@ -536,22 +583,27 @@ class AgentController extends ChangeNotifier {
     // Fetch screen size once for the whole loop
     final screenSize = await _screenCapture.getScreenSize();
 
-    while (step < _maxStepsPerCommand && _isActive && !_cancelRequested) {
+    while (step < _maxStepsPerCommand &&
+        taskTimer.elapsed < _maxTaskDuration &&
+        _isActive &&
+        !_cancelRequested) {
       step++;
 
       // 1. Capture screenshot (with retries for reliability after app switches)
       _setState(AgentState.capturing);
-      _statusMessage = '📸 Capturing screen... (step $step)';
+      _statusMessage = '📸 Observing screen... (step $step)';
       notifyListeners();
 
-      final screenshotFuture = _captureScreenWithRetry();
+      final screenshotFuture = _aiService.requiresScreenshot
+          ? _captureScreenWithRetry()
+          : Future<Uint8List?>.value(null);
       final uiSnapshotFuture = _fetchUiSnapshot();
       final screenshotTimer = Stopwatch()..start();
       final uiTimer = Stopwatch()..start();
 
       final screenshotBytes = await screenshotFuture;
       debugPrint(
-        'Lucy[$requestId] stage=screen_capture elapsed_ms=${screenshotTimer.elapsedMilliseconds}',
+        'Lucy[$requestId] stage=screen_observation elapsed_ms=${screenshotTimer.elapsedMilliseconds}',
       );
       if (screenshotBytes != null) {
         _lastScreenshotBytes = screenshotBytes;
@@ -579,7 +631,15 @@ class AgentController extends ChangeNotifier {
         imageBytes: screenshotBytes,
         screenSize: screenSize,
         uiTree: uiTree,
+        onToken: (_) {
+          if (_streamingStatus.isEmpty) {
+            _streamingStatus = 'Local output received';
+            _statusMessage = 'Generating local response…';
+            notifyListeners();
+          }
+        },
       );
+      _streamingStatus = '';
       debugPrint(
         'Lucy[$requestId] stage=ai_inference elapsed_ms=${inferenceTimer.elapsedMilliseconds}',
       );
@@ -679,6 +739,7 @@ class AgentController extends ChangeNotifier {
 
       // 5. Check if done
       if (agentResponse.done || !actionsSucceeded) {
+        taskCompleted = true;
         break;
       }
 
@@ -688,6 +749,17 @@ class AgentController extends ChangeNotifier {
       // If screenshot capture might fail next iteration, the AI will still
       // receive the message but without an image. The retry logic in
       // _captureScreenWithRetry handles this by making multiple attempts.
+    }
+
+    if (!_cancelRequested &&
+        !taskCompleted &&
+        (step >= _maxStepsPerCommand ||
+            taskTimer.elapsed >= _maxTaskDuration)) {
+      _isAskingForFurtherHelp = true;
+      _addConversation(
+        'Stopped at Lucy’s task limit (${_maxStepsPerCommand} steps or 2 minutes). Review the current screen before continuing.',
+        false,
+      );
     }
 
     // Always hide the stop notification when the loop ends
@@ -1226,8 +1298,11 @@ class AgentController extends ChangeNotifier {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _followupTimeoutTimer?.cancel();
     _voiceService.dispose();
+    _localModel.removeListener(_onLocalModelChanged);
+    unawaited(_localModel.disposeEngine());
     super.dispose();
   }
 }

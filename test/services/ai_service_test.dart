@@ -48,6 +48,7 @@ void main() {
       );
       expect(response.actions, isEmpty);
       expect(response.speak, contains('could not validate'));
+      expect(response.isValidated, isFalse);
     }
   });
 

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import '../services/ai_service.dart';
 import '../services/agent_controller.dart';
+import '../services/local_model_service.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key, required this.controller});
@@ -20,12 +22,11 @@ class SettingsScreen extends StatelessWidget {
             _statusTile(
               context,
               'AI provider',
-              controller.aiService.isConfigured
-                  ? 'Gemini configured; commands and screen content may be sent online'
-                  : 'No AI provider configured; supported exact local commands remain available',
-              controller.aiService.isConfigured
+              '${controller.aiService.activeProviderStatus} · ${_providerDescription(controller.aiService.providerMode)} · '
+                  '${controller.aiService.isConfigured ? 'Gemini key configured' : 'Gemini not configured'}',
+              controller.aiService.activeProviderStatus == 'GEMINI'
                   ? Icons.cloud_done_outlined
-                  : Icons.cloud_off_outlined,
+                  : Icons.memory,
             ),
             _statusTile(
               context,
@@ -58,6 +59,248 @@ class SettingsScreen extends StatelessWidget {
               'Background listening',
               controller.backgroundListeningStatus,
               Icons.notifications_paused_outlined,
+            ),
+            const Divider(height: 32),
+            Text(
+              'AI provider and local model',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            const SizedBox(height: 8),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Provider mode'),
+              subtitle: const Text(
+                'Local Only never calls Gemini. Local First uses Gemini only when fallback and cloud consent are both enabled.',
+              ),
+              trailing: DropdownButton<AiProviderMode>(
+                value: controller.aiService.providerMode,
+                onChanged: (mode) async {
+                  if (mode != null) await controller.setProviderMode(mode);
+                },
+                items: const [
+                  DropdownMenuItem(
+                    value: AiProviderMode.localOnly,
+                    child: Text('Local Only'),
+                  ),
+                  DropdownMenuItem(
+                    value: AiProviderMode.localFirst,
+                    child: Text('Local First'),
+                  ),
+                  DropdownMenuItem(
+                    value: AiProviderMode.cloudPreferred,
+                    child: Text('Cloud Preferred'),
+                  ),
+                ],
+              ),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Allow Gemini fallback'),
+              subtitle: const Text(
+                'Local First can use Gemini after local inference fails. Cloud data consent is also required.',
+              ),
+              value: controller.aiService.cloudFallbackEnabled,
+              onChanged:
+                  controller.aiService.providerMode == AiProviderMode.localOnly
+                  ? null
+                  : controller.setCloudFallbackEnabled,
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Allow requests and screen data to Gemini'),
+              subtitle: const Text(
+                'When enabled, your command, screenshot, and accessibility text may be sent to Google in a cloud mode.',
+              ),
+              value: controller.aiService.allowGeminiData,
+              onChanged: (enabled) async {
+                if (!enabled) {
+                  await controller.setAllowGeminiData(false);
+                  return;
+                }
+                final confirmed = await showDialog<bool>(
+                  context: context,
+                  builder: (dialogContext) => AlertDialog(
+                    title: const Text('Allow cloud data?'),
+                    content: const Text(
+                      'Lucy may send your request, current screenshot, and accessibility text to Google Gemini when Cloud Preferred is selected or Local First fallback is enabled. Continue?',
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(dialogContext, false),
+                        child: const Text('Cancel'),
+                      ),
+                      FilledButton(
+                        onPressed: () => Navigator.pop(dialogContext, true),
+                        child: const Text('Allow'),
+                      ),
+                    ],
+                  ),
+                );
+                if (confirmed == true) {
+                  await controller.setAllowGeminiData(true);
+                }
+              },
+            ),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'GGUF model',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(controller.localModel.statusDetails),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        const Expanded(child: Text('Context size')),
+                        DropdownButton<int>(
+                          value: controller.localModel.contextSize,
+                          onChanged: controller.localModel.isGenerating
+                              ? null
+                              : (value) async {
+                                  if (value != null) {
+                                    await controller.localModel.setContextSize(
+                                      value,
+                                    );
+                                  }
+                                },
+                          items: const [
+                            DropdownMenuItem(value: 1024, child: Text('1,024')),
+                            DropdownMenuItem(value: 2048, child: Text('2,048')),
+                            DropdownMenuItem(value: 4096, child: Text('4,096')),
+                          ],
+                        ),
+                      ],
+                    ),
+                    Text(
+                      'CPU inference is enabled. Context changes apply the next time the model loads.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    Row(
+                      children: [
+                        const Expanded(child: Text('Maximum response tokens')),
+                        DropdownButton<int>(
+                          value: controller.localModel.maxTokens,
+                          onChanged: (value) async {
+                            if (value != null) {
+                              await controller.localModel.setMaxTokens(value);
+                            }
+                          },
+                          items: const [
+                            DropdownMenuItem(value: 128, child: Text('128')),
+                            DropdownMenuItem(value: 256, child: Text('256')),
+                            DropdownMenuItem(value: 512, child: Text('512')),
+                          ],
+                        ),
+                      ],
+                    ),
+                    Row(
+                      children: [
+                        const Expanded(child: Text('Temperature')),
+                        DropdownButton<double>(
+                          value: controller.localModel.temperature,
+                          onChanged: (value) async {
+                            if (value != null) {
+                              await controller.localModel.setTemperature(value);
+                            }
+                          },
+                          items: const [
+                            DropdownMenuItem(value: 0.2, child: Text('0.2')),
+                            DropdownMenuItem(value: 0.4, child: Text('0.4')),
+                            DropdownMenuItem(value: 0.7, child: Text('0.7')),
+                            DropdownMenuItem(value: 1.0, child: Text('1.0')),
+                          ],
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        OutlinedButton.icon(
+                          onPressed:
+                              controller.localModel.isGenerating ||
+                                  controller.localModel.state ==
+                                      LocalModelState.loading ||
+                                  controller.localModel.state ==
+                                      LocalModelState.validating
+                              ? null
+                              : () async {
+                                  try {
+                                    await controller.selectLocalModel();
+                                  } catch (error) {
+                                    if (context.mounted) {
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        SnackBar(
+                                          content: Text(error.toString()),
+                                        ),
+                                      );
+                                    }
+                                  }
+                                },
+                          icon: const Icon(Icons.folder_open),
+                          label: const Text('Choose GGUF'),
+                        ),
+                        if (!controller.localModel.isReady)
+                          FilledButton.icon(
+                            onPressed:
+                                controller.localModel.hasSelectedModel &&
+                                    controller.localModel.state !=
+                                        LocalModelState.loading &&
+                                    !controller.localModel.isGenerating
+                                ? () async {
+                                    try {
+                                      await controller.loadLocalModel();
+                                    } catch (error) {
+                                      if (context.mounted) {
+                                        ScaffoldMessenger.of(
+                                          context,
+                                        ).showSnackBar(
+                                          SnackBar(
+                                            content: Text(error.toString()),
+                                          ),
+                                        );
+                                      }
+                                    }
+                                  }
+                                : null,
+                            icon: const Icon(Icons.play_arrow),
+                            label: const Text('Load'),
+                          )
+                        else
+                          OutlinedButton.icon(
+                            onPressed: controller.localModel.isGenerating
+                                ? null
+                                : () async {
+                                    try {
+                                      await controller.unloadLocalModel();
+                                    } catch (error) {
+                                      if (context.mounted) {
+                                        ScaffoldMessenger.of(
+                                          context,
+                                        ).showSnackBar(
+                                          SnackBar(
+                                            content: Text(error.toString()),
+                                          ),
+                                        );
+                                      }
+                                    }
+                                  },
+                            icon: const Icon(Icons.stop_circle_outlined),
+                            label: const Text('Unload'),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
             ),
             const Divider(height: 32),
             Text('Voice', style: Theme.of(context).textTheme.titleLarge),
@@ -145,6 +388,12 @@ class SettingsScreen extends StatelessWidget {
       ),
     );
   }
+
+  String _providerDescription(AiProviderMode mode) => switch (mode) {
+    AiProviderMode.localOnly => 'Local Only',
+    AiProviderMode.localFirst => 'Local First',
+    AiProviderMode.cloudPreferred => 'Cloud Preferred',
+  };
 
   Widget _statusTile(
     BuildContext context,

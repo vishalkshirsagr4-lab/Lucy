@@ -6,18 +6,25 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Build
+import android.os.StatFs
+import android.provider.OpenableColumns
 import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
+import java.io.FileOutputStream
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.poc.screen_aware_ai/screen"
     private val SCREEN_CAPTURE_REQUEST_CODE = 1001
+    private val MODEL_PICK_REQUEST_CODE = 1002
     private val TAG = "MainActivity"
 
     private var pendingResult: MethodChannel.Result? = null
+    private var pendingModelResult: MethodChannel.Result? = null
     private var mediaProjectionManager: MediaProjectionManager? = null
     private var methodChannel: MethodChannel? = null
 
@@ -53,6 +60,25 @@ class MainActivity : FlutterActivity() {
         methodChannel = channel
         channel.setMethodCallHandler { call, result ->
             when (call.method) {
+                "selectLocalModel" -> {
+                    if (pendingModelResult != null) {
+                        result.error("MODEL_PICKER_BUSY", "A model selection is already in progress", null)
+                    } else {
+                        pendingModelResult = result
+                        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                            addCategory(Intent.CATEGORY_OPENABLE)
+                            type = "*/*"
+                            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/octet-stream", "application/x-gguf"))
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        try {
+                            startActivityForResult(intent, MODEL_PICK_REQUEST_CODE)
+                        } catch (e: Exception) {
+                            pendingModelResult = null
+                            result.error("MODEL_PICKER_UNAVAILABLE", "Android could not open the document picker", null)
+                        }
+                    }
+                }
                 "requestScreenCapture" -> {
                     pendingResult = result
                     val intent = mediaProjectionManager!!.createScreenCaptureIntent()
@@ -129,10 +155,7 @@ class MainActivity : FlutterActivity() {
                     val y = call.argument<Double>("y")?.toFloat() ?: 0f
                     val service = ScreenActionService.instance
                     if (service != null) {
-                        Thread {
-                            val success = service.performTap(x, y)
-                            runOnUiThread { result.success(success) }
-                        }.start()
+                        service.performTap(x, y) { success -> result.success(success) }
                     } else {
                         result.error("NO_SERVICE", "Accessibility service not enabled", null)
                     }
@@ -144,14 +167,12 @@ class MainActivity : FlutterActivity() {
                     if (service == null) {
                         result.error("NO_SERVICE", "Accessibility service not enabled", null)
                     } else {
-                        Thread {
-                            val success = if (call.method == "performLongPress") {
-                                service.performLongPress(x, y)
-                            } else {
-                                service.performDoubleTap(x, y)
-                            }
-                            runOnUiThread { result.success(success) }
-                        }.start()
+                        val callback: (Boolean) -> Unit = { success -> result.success(success) }
+                        if (call.method == "performLongPress") {
+                            service.performLongPress(x, y, callback)
+                        } else {
+                            service.performDoubleTap(x, y, callback)
+                        }
                     }
                 }
                 "performType" -> {
@@ -201,10 +222,9 @@ class MainActivity : FlutterActivity() {
                     val endY = call.argument<Double>("endY")?.toFloat() ?: 0f
                     val service = ScreenActionService.instance
                     if (service != null) {
-                        Thread {
-                            val success = service.performSwipe(startX, startY, endX, endY)
-                            runOnUiThread { result.success(success) }
-                        }.start()
+                        service.performSwipe(startX, startY, endX, endY) { success ->
+                            result.success(success)
+                        }
                     } else {
                         result.error("NO_SERVICE", "Accessibility service not enabled", null)
                     }
@@ -255,7 +275,28 @@ class MainActivity : FlutterActivity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == SCREEN_CAPTURE_REQUEST_CODE) {
+        if (requestCode == MODEL_PICK_REQUEST_CODE) {
+            val result = pendingModelResult
+            pendingModelResult = null
+            if (result == null) return
+            val uri = data?.data
+            if (resultCode != Activity.RESULT_OK || uri == null) {
+                result.success(null)
+                return
+            }
+            Thread({
+                try {
+                    val imported = importLocalModel(uri)
+                    runOnUiThread { result.success(imported) }
+                } catch (e: Exception) {
+                    val message = when (e) {
+                        is IllegalArgumentException -> e.message ?: "Choose a GGUF model file."
+                        else -> "Could not import the selected model. Check storage space and choose a readable .gguf file."
+                    }
+                    runOnUiThread { result.error("MODEL_IMPORT_FAILED", message, null) }
+                }
+            }, "LucyModelImport").start()
+        } else if (requestCode == SCREEN_CAPTURE_REQUEST_CODE) {
             if (resultCode == Activity.RESULT_OK && data != null) {
                 // Store projection data for potential reinitialization later
                 projectionResultCode = resultCode
@@ -288,6 +329,90 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    /** Stream the selected document to private storage without buffering model weights in RAM. */
+    private fun importLocalModel(uri: Uri): Map<String, Any> {
+        var displayName: String? = null
+        var declaredSize: Long? = null
+        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (nameIndex >= 0) displayName = cursor.getString(nameIndex)
+                val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (sizeIndex >= 0) {
+                    val size = cursor.getLong(sizeIndex)
+                    if (size >= 0) declaredSize = size
+                }
+            }
+        }
+        val name = displayName?.takeIf { it.isNotBlank() } ?: "selected-model.gguf"
+        if (!name.lowercase().endsWith(".gguf")) {
+            throw IllegalArgumentException("Choose a .gguf model file.")
+        }
+
+        val modelDir = File(filesDir, "models")
+        if (!modelDir.exists() && !modelDir.mkdirs()) {
+            throw IllegalStateException("Could not create private model storage.")
+        }
+        if (declaredSize != null && StatFs(modelDir.path).availableBytes < declaredSize!!) {
+            throw IllegalStateException("Not enough free storage to copy this model.")
+        }
+
+        val temporary = File(modelDir, "lucy-model.gguf.tmp")
+        val target = File(modelDir, "lucy-model.gguf")
+        val backup = File(modelDir, "lucy-model.gguf.bak")
+        var copied = 0L
+        try {
+            val input = contentResolver.openInputStream(uri)
+                ?: throw IllegalStateException("Android could not read the selected document.")
+            input.use { source ->
+                FileOutputStream(temporary, false).buffered(1024 * 1024).use { output ->
+                    val buffer = ByteArray(1024 * 1024)
+                    while (true) {
+                        val count = source.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                        copied += count
+                    }
+                    output.flush()
+                }
+            }
+            if (copied < 4) throw IllegalArgumentException("The selected model is incomplete.")
+            val header = ByteArray(4)
+            val headerRead = temporary.inputStream().use { stream ->
+                var offset = 0
+                while (offset < header.size) {
+                    val count = stream.read(header, offset, header.size - offset)
+                    if (count < 0) break
+                    offset += count
+                }
+                offset
+            }
+            if (headerRead != 4 || String(header, Charsets.US_ASCII) != "GGUF") {
+                throw IllegalArgumentException("The selected file does not have a GGUF header.")
+            }
+
+            if (backup.exists()) backup.delete()
+            val hadPrevious = target.exists()
+            if (hadPrevious && !target.renameTo(backup)) {
+                throw IllegalStateException("Could not safely replace the previous model file.")
+            }
+            if (!temporary.renameTo(target)) {
+                if (hadPrevious) backup.renameTo(target)
+                throw IllegalStateException("Could not finish importing the model file.")
+            }
+            if (backup.exists()) backup.delete()
+            return mapOf(
+                "path" to target.absolutePath,
+                "name" to name,
+                "bytes" to copied,
+                "format" to "GGUF",
+            )
+        } finally {
+            if (temporary.exists()) temporary.delete()
+            if (backup.exists() && !target.exists()) backup.renameTo(target)
+        }
+    }
+
     override fun onDestroy() {
         try {
             unregisterReceiver(forceStopReceiver)
@@ -295,6 +420,8 @@ class MainActivity : FlutterActivity() {
             Log.w(TAG, "Failed to unregister forceStopReceiver", e)
         }
         methodChannel = null
+        pendingResult = null
+        pendingModelResult = null
         super.onDestroy()
     }
 }

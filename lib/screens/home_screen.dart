@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../services/ai_service.dart';
 import '../services/agent_controller.dart';
 import 'settings_screen.dart';
 
@@ -144,8 +145,7 @@ class _HomeScreenState extends State<HomeScreen>
             tooltip: 'Settings',
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute<void>(
-                builder: (_) =>
-                    SettingsScreen(controller: widget.controller),
+                builder: (_) => SettingsScreen(controller: widget.controller),
               ),
             ),
           ),
@@ -183,23 +183,30 @@ class _HomeScreenState extends State<HomeScreen>
   Widget _buildCapabilitySummary(ColorScheme colorScheme) {
     final controller = widget.controller;
     final statuses = <(String, String)>[
+      ('AI', controller.aiService.activeProviderStatus),
       (
-        'AI',
-        controller.aiService.isConfigured ? 'Gemini online' : 'No provider',
+        'Mode',
+        switch (controller.aiService.providerMode) {
+          AiProviderMode.localOnly => 'Local Only',
+          AiProviderMode.localFirst => 'Local First',
+          AiProviderMode.cloudPreferred => 'Cloud Preferred',
+        },
       ),
-      ('Local AI', 'Unavailable'),
+      ('Local AI', controller.localModel.statusLabel),
       (
         'Speech',
-        controller.speechRecognitionReady
-            ? 'Device recognizer'
-            : 'Unavailable',
+        controller.speechRecognitionReady ? 'Device recognizer' : 'Unavailable',
       ),
       ('Microphone', controller.microphoneStatus),
       ('Wake word', 'Unavailable'),
       ('Background', 'Manual only'),
       (
         'Internet',
-        controller.aiService.isConfigured ? 'Required for Gemini' : 'Not measured',
+        controller.aiService.allowGeminiData &&
+                controller.aiService.isConfigured &&
+                controller.aiService.providerMode != AiProviderMode.localOnly
+            ? 'Gemini allowed by consent'
+            : 'Not used by current policy',
       ),
       ('Accessibility', _isAccessibilityEnabled ? 'Enabled' : 'Not enabled'),
       (

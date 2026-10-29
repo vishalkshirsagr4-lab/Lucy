@@ -4,6 +4,8 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.graphics.Rect
+import android.os.Handler
+import android.os.Looper
 import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
@@ -11,8 +13,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class ScreenActionService : AccessibilityService() {
 
@@ -35,62 +36,63 @@ class ScreenActionService : AccessibilityService() {
         // Required override
     }
 
-    /**
-     * Dispatch a gesture and wait for completion (up to 2 seconds).
-     * Returns true if completed, false if cancelled or timed out.
-     */
-    private fun dispatchGestureSync(gesture: GestureDescription): Boolean {
-        val latch = CountDownLatch(1)
-        var success = false
-
+    /** Dispatch without blocking the accessibility service's callback thread. */
+    private fun dispatchGestureAsync(
+        gesture: GestureDescription,
+        callback: (Boolean) -> Unit,
+    ) {
+        val handler = Handler(Looper.getMainLooper())
+        val completed = AtomicBoolean(false)
+        val timeout = Runnable {
+            if (completed.compareAndSet(false, true)) callback(false)
+        }
         val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {
                 super.onCompleted(gestureDescription)
-                success = true
-                latch.countDown()
+                if (completed.compareAndSet(false, true)) {
+                    handler.removeCallbacks(timeout)
+                    callback(true)
+                }
             }
 
             override fun onCancelled(gestureDescription: GestureDescription?) {
                 super.onCancelled(gestureDescription)
-                Log.w(TAG, "Gesture was cancelled")
-                success = false
-                latch.countDown()
+                if (completed.compareAndSet(false, true)) {
+                    handler.removeCallbacks(timeout)
+                    callback(false)
+                }
             }
-        }, null)
+        }, handler)
 
         if (!dispatched) {
-            Log.e(TAG, "dispatchGesture returned false — gesture not dispatched")
-            return false
+            if (completed.compareAndSet(false, true)) callback(false)
+        } else {
+            handler.postDelayed(timeout, 2500)
         }
-
-        // Wait up to 2 seconds for the gesture to complete
-        latch.await(2, TimeUnit.SECONDS)
-        return success
     }
 
-    fun performTap(x: Float, y: Float): Boolean {
-        Log.d(TAG, "performTap($x, $y)")
+    fun performTap(x: Float, y: Float, callback: (Boolean) -> Unit) {
         val path = Path()
         path.moveTo(x, y)
 
         val gestureBuilder = GestureDescription.Builder()
         gestureBuilder.addStroke(GestureDescription.StrokeDescription(path, 0, 100))
-
-        return dispatchGestureSync(gestureBuilder.build())
+        dispatchGestureAsync(gestureBuilder.build(), callback)
     }
 
-    fun performLongPress(x: Float, y: Float): Boolean {
+    fun performLongPress(x: Float, y: Float, callback: (Boolean) -> Unit) {
         val path = Path().apply { moveTo(x, y) }
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, 700))
             .build()
-        return dispatchGestureSync(gesture)
+        dispatchGestureAsync(gesture, callback)
     }
 
-    fun performDoubleTap(x: Float, y: Float): Boolean {
+    fun performDoubleTap(x: Float, y: Float, callback: (Boolean) -> Unit) {
         // Separate gestures are accepted more consistently across Android versions.
-        if (!performTap(x, y)) return false
-        return performTap(x, y)
+        performTap(x, y) { firstSucceeded ->
+            if (firstSucceeded) performTap(x, y, callback) else callback(false)
+        }
     }
 
     fun performType(text: String): Boolean {
@@ -125,8 +127,14 @@ class ScreenActionService : AccessibilityService() {
         return null
     }
 
-    fun performSwipe(startX: Float, startY: Float, endX: Float, endY: Float, durationMs: Long = 300): Boolean {
-        Log.d(TAG, "performSwipe($startX, $startY -> $endX, $endY)")
+    fun performSwipe(
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+        callback: (Boolean) -> Unit,
+        durationMs: Long = 300,
+    ) {
         val path = Path()
         path.moveTo(startX, startY)
         path.lineTo(endX, endY)
@@ -134,7 +142,7 @@ class ScreenActionService : AccessibilityService() {
         val gestureBuilder = GestureDescription.Builder()
         gestureBuilder.addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
 
-        return dispatchGestureSync(gestureBuilder.build())
+        dispatchGestureAsync(gestureBuilder.build(), callback)
     }
 
     fun pressBack(): Boolean {

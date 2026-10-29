@@ -74,7 +74,7 @@ Say *"Open WhatsApp and send Sarah a message saying I'm running late."* Lucy wil
 1. 👂 Transcribe your voice
 2. 📸 Take a screenshot of whatever is currently on screen
 3. 🌲 Read the Android **accessibility tree** — every button, label and text field with exact pixel bounds
-4. 🤖 Send the screenshot **and** the UI tree to Google Gemini, which replies with a single next action
+4. 🤖 Use the selected local or consented cloud provider to choose one next action
 5. ⚡ Execute that action through the accessibility service — a real tap, a real keystroke
 6. 🔁 Take a fresh screenshot and repeat until the task is done
 7. 🔊 Speak the result back to you, in your language
@@ -106,31 +106,43 @@ That turned out to be one case out of several. The common thread is *your hands 
 | | |
 |---|---|
 | 🗣️ **Voice-driven** | Speech-to-text in, text-to-speech out. No typing required. |
-| 👁️ **Screen-aware** | Combines a JPEG screenshot with a structured accessibility tree, so the model sees *and* reads the screen. |
+| 👁️ **Screen-aware** | Local inference uses accessibility text; Gemini can also receive a screenshot when cloud-data consent is enabled. |
 | 🎯 **No hallucinated taps** | The model taps elements **by ID**, never by guessed coordinates. Real pixel bounds are resolved on the Dart side from the accessibility tree. |
 | 🌍 **Trilingual** | English 🇬🇧, Japanese 🇯🇵 and Arabic 🇸🇦 — with language detection and matching TTS/STT locales. |
-| 🔄 **Agentic loop** | Observe → decide → act → re-observe, up to 50 steps per command. |
+| 🔄 **Agentic loop** | Observe → decide → act → re-observe, up to 12 steps or 2 minutes per command. |
 | 🛑 **Always interruptible** | A persistent "Stop Lucy" notification cancels the agent instantly, even while she's inside another app. |
 | 🎨 **Live transcript** | Every screenshot, action and reply is shown in a scrollable conversation view. |
-| 🔑 **Bring your own key** | Your Gemini API key stays on your device. No backend, no telemetry, no account. |
+| 🔑 **Bring your own key** | Your Gemini API key is kept in memory for the current app session. No project backend or telemetry. |
 
-## Current offline and provider limitations
+## Local inference and provider modes
 
-Lucy can start voice interaction without a Gemini key. A small deterministic
-router handles a limited set of exact commands (supported app launches, back,
-home, stop/sleep, cancel, and repeat) without sending them to an AI service.
-Other requests require a configured Gemini API key; without one, Lucy explains
-that she cannot interpret the request. Configure Gemini only if you consent to
-sending the request and any attached screen content to Google.
+Lucy integrates [`llamadart`](https://pub.dev/packages/llamadart) with its
+`llama.cpp` runtime for GGUF inference on supported Android arm64 and x64
+devices. Settings opens Android's document picker and copies the selected file
+to app-private storage in chunks. Lucy checks the `.gguf` extension and GGUF
+header when selecting; runtime and model compatibility are confirmed only when
+the native engine successfully loads the weights. No model is bundled or
+downloaded by Lucy. Start with a small mobile model and verify its memory use
+and speed on the target device.
 
-This repository does **not yet include** a local GGUF inference runtime, model
-import/management, or a selectable local-vs-online provider setting. No model
-is downloaded or bundled. The current Android speech plugin delegates
-recognition to the device's speech-recognition service; offline recognition
-availability and language packs vary by device and are not verified by Lucy.
-There is no offline wake-word detector, so voice activation currently requires
-starting Lucy from the in-app microphone control. Do not treat this build as an
-always-listening or offline-capable assistant.
+Provider policy is selectable in Settings:
+
+- **Local Only** uses the local model or deterministic command router and
+  never calls Gemini.
+- **Local First** tries local inference; Gemini fallback requires both the
+  fallback switch and the separate cloud-data consent switch.
+- **Cloud Preferred** uses Gemini only when the API key is configured and
+  cloud-data consent is enabled. A loaded local model remains available when
+  cloud access is not allowed.
+
+Cloud-data consent is off by default. When enabled in a cloud mode, Lucy may
+send the request, screenshot, and accessibility text to Google. The selected
+GGUF path runs text-only inference: Lucy does not send screenshots to the local
+model or claim local visual understanding. Android speech recognition still
+uses the device's speech-recognition service; offline availability and
+language packs vary by device and are not verified by Lucy. There is no
+offline wake-word detector, so voice activation requires starting Lucy from
+the in-app microphone control.
 
 AI action output is parsed against a small allowlist before execution. Action
 success messages are based on the Android method-channel operation's returned
@@ -363,7 +375,16 @@ The first build downloads Gradle dependencies and can take several minutes. Late
 
 ### Step 7 — Add your key to Lucy
 
-In the app, tap the 🔑 **key icon** in the top bar, paste your key and hit **Save**. It is stored locally with `shared_preferences` and never leaves your device except in requests to Google's Gemini API.
+In the app, tap the 🔑 **key icon** in the top bar, paste your key and hit **Save**. The key remains in memory for this app session and is used only when the provider policy and cloud-data consent allow Gemini requests.
+
+### Optional — Load a local GGUF model
+
+Open **Settings → AI provider and local model → Choose GGUF**, select a model
+from Android's document picker, then tap **Load**. Lucy copies the model to
+app-private storage and loads it into the native llama.cpp runtime. Settings
+shows file selection separately from runtime readiness. Local inference uses
+CPU and accessibility text, not screenshots. Load duration, memory use, and
+compatibility depend on the device and selected model.
 
 ### Step 8 — Enable the accessibility service
 
@@ -416,7 +437,7 @@ Three ways, in order of urgency:
 2. **The "Stop Lucy" notification** — swipe down from anywhere, even inside another app, and tap **Stop Lucy**. This is the one you want when she's off doing something in a different app.
 3. **Force-stop the app** from Android settings — the nuclear option.
 
-Lucy also stops herself automatically after **50 steps** on a single command, so she can never loop forever.
+Lucy also stops after **12 steps or 2 minutes** on a single command, whichever comes first.
 
 ---
 
@@ -574,19 +595,19 @@ Please read this before installing. Lucy is powerful precisely because she has d
 
 **What leaves your device**
 
-- 📸 **Screenshots** (downscaled to max 1280px, JPEG quality 72) are sent to the **Google Gemini API** on every step of an active task.
-- 🌲 The **accessibility tree** — including any text visible on screen — is sent with them.
+- 📸 **Screenshots and accessibility text** may be sent to Google Gemini only when cloud-data consent is enabled and a cloud route is selected.
+- 🌲 The accessibility tree may also be sent when cloud-data consent is enabled.
 - 🎤 **Voice** is transcribed by Android's speech recognizer, subject to your device's own settings.
 
 **What does not**
 
 - Lucy has **no backend**. There is no analytics, no crash reporting, no account, no server operated by this project.
-- Your **API key** is stored locally in `shared_preferences` and only ever sent to Google.
+- Your **API key** remains in memory for the current app session. Lucy has no project-operated backend.
 
 **What this means in practice**
 
 > [!CAUTION]
-> While a task is running, **anything visible on your screen may be sent to Google** — including messages, emails, banking screens and notifications. The accessibility service can also read text fields and dispatch taps. Don't run Lucy while sensitive information is on screen, and review [Google's Gemini API terms](https://ai.google.dev/gemini-api/terms) to understand how prompt data is handled on your tier.
+> If you enable cloud-data consent and use a cloud route, **screen text and screenshots may be sent to Google** — including messages, emails, banking screens and notifications. Review the consent prompt and [Google's Gemini API terms](https://ai.google.dev/gemini-api/terms) before enabling it. The accessibility service can read exposed text fields and dispatch taps.
 
 **Recommendations**
 
@@ -604,9 +625,9 @@ Found a security issue? Please read **[SECURITY.md](SECURITY.md)** — don't ope
 Ideas that would make great contributions. Comment on an issue or open one to claim it:
 
 - [ ] 🔒 **Confirmation gate** for destructive actions (sending messages, purchases, deletions)
-- [ ] 🧩 **Pluggable AI backends** — OpenAI, Anthropic, or a local model behind the `AiService` interface
+- [ ] 🧩 **Device integration coverage** for local model load, offline generation, low memory, and accessibility actions
 - [ ] 🚫 **App allowlist/blocklist** so Lucy can never touch chosen apps
-- [ ] 💾 **Persistent conversation history** across restarts
+- [ ] 💾 **Task history controls** for inspecting and deleting saved conversation text
 - [ ] 🌐 **More languages** (see [CONTRIBUTING.md](CONTRIBUTING.md#-adding-a-language) — it's a ~20-line change)
 - [ ] 🧪 **Test coverage** for the `AgentController` state machine
 - [ ] 📊 **Token/cost counter** in the UI

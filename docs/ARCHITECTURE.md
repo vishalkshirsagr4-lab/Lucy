@@ -25,7 +25,8 @@ graph TB
     subgraph flutter["Flutter · Dart"]
         UI[home_screen.dart<br/>conversation UI]
         AC[agent_controller.dart<br/>state machine + agent loop]
-        AI[ai_service.dart<br/>Gemini client]
+        AI[ai_service.dart<br/>provider routing + Gemini]
+        LM[local_model_service.dart<br/>GGUF lifecycle + inference]
         VS[voice_service.dart<br/>STT + TTS]
         SC[screen_capture_service.dart<br/>channel client]
     end
@@ -38,12 +39,15 @@ graph TB
     end
 
     GEM[[Google Gemini API]]
+    GGUF[[Private GGUF file<br/>llama.cpp runtime]]
 
     UI <--> AC
     AC --> AI
+    AI --> LM
+    LM --> GGUF
     AC <--> VS
     AC --> SC
-    AI <--> GEM
+    AI <-->|cloud route + explicit consent| GEM
     SC <-->|MethodChannel| MA
     MA --> CAP
     MA --> ACT
@@ -61,27 +65,36 @@ There is exactly one `AgentController`, created in `main.dart` and passed down t
 
 ## The agent loop
 
-`AgentController._runAgentLoop()` is the heart of the project. It runs at most **50 steps** (`_maxStepsPerCommand`) per user command.
+`AgentController._runAgentLoop()` is the heart of the project. It runs at most **12 steps** or **2 minutes** per user command.
 
 ```mermaid
 sequenceDiagram
     participant U as User
     participant AC as AgentController
     participant N as Native
-    participant G as Gemini
+    participant AI as Provider router
+    participant LM as Local GGUF runtime
+    participant G as Gemini (consented cloud route)
 
     U->>AC: "Open WhatsApp and message Sarah"
     AC->>N: showStopOverlay()
     AC->>N: getScreenSize()
 
-    loop up to 50 steps, until done or cancelled
+    loop up to 12 steps / 2 minutes, until done or cancelled
         par observe
             AC->>N: captureScreen() → JPEG bytes
         and
             AC->>N: getUITree() → JSON
         end
-        AC->>G: screenshot + UI tree + message
-        G-->>AC: {actions: [one], speak, done, lang}
+        AC->>AI: message + screen observation
+        alt Local mode with loaded model
+            AI->>LM: text prompt + accessibility tree
+            LM-->>AI: streamed JSON tokens
+        else Cloud route with explicit data consent
+            AI->>G: request + screenshot + accessibility tree
+            G-->>AI: {actions: [one], speak, done, lang}
+        end
+        AI-->>AC: validated action and reply
         AC->>AC: update language from `lang`
         AC->>AC: append to conversation
         alt has actions
@@ -109,7 +122,9 @@ Key properties:
 
 **Capture is retried.** After navigating to a new app, the `VirtualDisplay` often hasn't rendered a frame yet, so the first capture returns null. `_captureScreenWithRetry()` makes up to 3 attempts.
 
-**`done` drives the exit.** When Gemini sets `done: true`, Lucy appends the localized "Do you need any further help?" prompt, sets `_isAskingForFurtherHelp`, and breaks out of the loop back into listening.
+**`done` drives the exit.** When the selected provider returns `done: true`, Lucy appends the localized "Do you need any further help?" prompt, sets `_isAskingForFurtherHelp`, and breaks out of the loop back into listening.
+
+**Cloud access has two gates.** `Local Only` cannot call Gemini. `Local First` requires both fallback enablement and explicit cloud-data consent before a fallback can include a request, screenshot, or accessibility tree. `Cloud Preferred` also requires consent. The local text model receives the accessibility tree but no screenshot and does not claim visual understanding.
 
 ---
 
@@ -139,7 +154,7 @@ stateDiagram-v2
 Two guards keep the loop from spinning forever:
 
 - `_maxListenRetries = 3` — if speech recognition returns empty three times in a row, Lucy stops and asks you to tap the mic.
-- `_maxStepsPerCommand = 50` — a hard ceiling on agent steps per command.
+- `_maxStepsPerCommand = 12 plus a two-minute overall timeout` — a hard ceiling on agent steps per command.
 
 ---
 
@@ -234,11 +249,11 @@ If the active window yields a suspiciously sparse tree, the service falls back t
 
 ### 2. Acting on the screen
 
-- **Tap / swipe** — `dispatchGesture()` with a `GestureDescription`. Wrapped in `dispatchGestureSync()`, which blocks on a `CountDownLatch` for up to 2 seconds so callers know whether the gesture actually landed.
+- **Tap / swipe** — `dispatchGesture()` with a `GestureDescription`. The accessibility service dispatches asynchronously and reports completion through a callback with a 2.5-second native timeout.
 - **Type** — `ACTION_SET_TEXT` on the focused editable node.
 - **Back / home** — `performGlobalAction()`.
 
-Because `dispatchGestureSync` blocks, `MainActivity` runs these on a background `Thread` and returns the result via `runOnUiThread`. Calling them directly on the platform thread would deadlock the channel.
+`MainActivity` completes the method-channel result from the gesture callback. Dart also applies a bounded timeout; no `CountDownLatch` or waiting worker thread is used.
 
 ---
 
@@ -301,7 +316,7 @@ Stopping a screen-controlling agent has to work even when the agent is inside an
 
 1. **In-app** — tapping the mic button while active calls `stopAgent()`.
 2. **Notification** — `OverlayService` posts a persistent notification with a **Stop Lucy** action. Tapping it broadcasts `com.poc.screen_aware_ai.FORCE_STOP`, which `MainActivity` receives and forwards to Flutter as `onForceStop`, which calls `requestCancel()`.
-3. **Step ceiling** — the loop exits on its own after 50 steps.
+3. **Task bounds** — the loop exits after 12 steps or 2 minutes, and cancellation stops local generation.
 
 `_cancelRequested` is checked at **nine** points inside a single loop iteration — after capture, after the UI tree, after the model call, between actions, after speaking. This is why cancellation feels instant instead of waiting for the current step to finish.
 

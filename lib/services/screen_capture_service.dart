@@ -11,6 +11,15 @@ class ScreenCaptureManager {
 
   bool _handlerRegistered = false;
 
+  /// Opens Android's document picker and copies a selected GGUF file into
+  /// Lucy's app-private files directory. No broad storage permission is used.
+  Future<Map<String, dynamic>?> selectLocalModel() async {
+    final result = await _channel.invokeMapMethod<String, dynamic>(
+      'selectLocalModel',
+    );
+    return result;
+  }
+
   /// Ensure the reverse method call handler is registered (native → Dart).
   void _ensureHandler() {
     if (_handlerRegistered) return;
@@ -149,10 +158,9 @@ class ScreenCaptureManager {
   /// Perform a tap at the given coordinates
   Future<bool> performTap(double x, double y) async {
     try {
-      final result = await _channel.invokeMethod<bool>('performTap', {
-        'x': x,
-        'y': y,
-      });
+      final result = await _channel
+          .invokeMethod<bool>('performTap', {'x': x, 'y': y})
+          .timeout(const Duration(seconds: 3));
       return result ?? false;
     } catch (e) {
       print('Error performing tap: $e');
@@ -162,10 +170,9 @@ class ScreenCaptureManager {
 
   Future<bool> performLongPress(double x, double y) async {
     try {
-      return await _channel.invokeMethod<bool>('performLongPress', {
-            'x': x,
-            'y': y,
-          }) ??
+      return await _channel
+              .invokeMethod<bool>('performLongPress', {'x': x, 'y': y})
+              .timeout(const Duration(seconds: 3)) ??
           false;
     } catch (e) {
       print('Error performing long press: $e');
@@ -175,10 +182,9 @@ class ScreenCaptureManager {
 
   Future<bool> performDoubleTap(double x, double y) async {
     try {
-      return await _channel.invokeMethod<bool>('performDoubleTap', {
-            'x': x,
-            'y': y,
-          }) ??
+      return await _channel
+              .invokeMethod<bool>('performDoubleTap', {'x': x, 'y': y})
+              .timeout(const Duration(seconds: 6)) ??
           false;
     } catch (e) {
       print('Error performing double tap: $e');
@@ -207,12 +213,14 @@ class ScreenCaptureManager {
     double endY,
   ) async {
     try {
-      final result = await _channel.invokeMethod<bool>('performSwipe', {
-        'startX': startX,
-        'startY': startY,
-        'endX': endX,
-        'endY': endY,
-      });
+      final result = await _channel
+          .invokeMethod<bool>('performSwipe', {
+            'startX': startX,
+            'startY': startY,
+            'endX': endX,
+            'endY': endY,
+          })
+          .timeout(const Duration(seconds: 3));
       return result ?? false;
     } catch (e) {
       print('Error performing swipe: $e');

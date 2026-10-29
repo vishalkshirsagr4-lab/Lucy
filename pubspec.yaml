@@ -37,6 +37,7 @@ dependencies:
   flutter_tts: ^4.2.0
   path_provider: ^2.1.5
   shared_preferences: ^2.3.4
+  llamadart: ^0.16.5
 
 dev_dependencies:
   flutter_test:
@@ -59,6 +60,11 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+hooks:
+  user_defines:
+    llamadart:
+      llamadart_native_runtimes: [llama_cpp]
 
   # To add assets to your application, add an assets section, like this:
   # assets:
