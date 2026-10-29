@@ -4,7 +4,8 @@ import 'package:google_generative_ai/google_generative_ai.dart';
 
 /// Represents a single action the AI wants to perform.
 class AgentAction {
-  final String type; // tap, type, open_app, back, home, swipe, wait
+  final String
+  type; // tap, long_press, double_tap, type, clear, open_app, back, home, swipe, wait
   final Map<String, dynamic> params;
 
   AgentAction({required this.type, this.params = const {}});
@@ -81,6 +82,8 @@ class AgentResponse {
         }
         break;
       case 'tap':
+      case 'long_press':
+      case 'double_tap':
         final element = action['element'];
         if (!hasOnly({'element'}) || element is! int || element < 0) {
           throw const FormatException('Invalid tap parameters');
@@ -93,6 +96,11 @@ class AgentResponse {
             text.isEmpty ||
             text.length > 2000) {
           throw const FormatException('Invalid type parameters');
+        }
+        break;
+      case 'clear':
+        if (action.isNotEmpty) {
+          throw const FormatException('Clear takes no parameters');
         }
         break;
       case 'swipe':
@@ -169,7 +177,10 @@ THE UI TREE gives you each element's:
 AVAILABLE ACTIONS:
 - {"type": "open_app", "package": "com.whatsapp"} — Launch an app by package name
 - {"type": "tap", "element": 5} — Tap the UI tree element with the given id. ALWAYS use this for tapping.
+- {"type": "long_press", "element": 5} — Long-press the UI tree element with the given id.
+- {"type": "double_tap", "element": 5} — Double-tap the UI tree element with the given id.
 - {"type": "type", "text": "Hello!"} — Type text into the focused input field
+- {"type": "clear"} — Clear the currently focused input field
 - {"type": "swipe", "startX": 540, "startY": 1500, "endX": 540, "endY": 500} — Swipe/scroll
 - {"type": "back"} — Press the back button
 - {"type": "home"} — Press the home button
@@ -202,13 +213,14 @@ COMMON APP PACKAGES:
 CRITICAL RULES:
 1. You MUST respond with ONLY valid JSON. No markdown, no explanation outside JSON.
 2. Return EXACTLY ONE action per response. After each action you will receive a fresh screenshot and UI tree showing the result. Do NOT batch multiple actions.
-3. For taps: ALWAYS use {"type": "tap", "element": <id>} where <id> is the element's "id" from the UI tree. NEVER use raw x/y coordinates for taps. NEVER guess coordinates from the screenshot.
+3. For taps and press gestures: ALWAYS use {"type": "tap"|"long_press"|"double_tap", "element": <id>} where <id> is the element's "id" from the UI tree. NEVER guess coordinates from the screenshot.
 4. After performing an action, set "done": false to receive the updated screen.
 5. Set "done": true only when the user's request is fully completed or you've reported the info they asked for.
 6. Keep "speak" concise — it will be read aloud. Only include "speak" text when you have something meaningful to tell the user (e.g., task done, error, or asking for clarification). For intermediate steps, use an empty string.
 7. If you cannot perform an action or need more info, explain in "speak" and set "done": true.
 8. When asked to read/describe screen content, read it from the screenshot and UI tree, speak it, and set "done": true.
 9. Use the UI tree "package" field to confirm which app is in the foreground.
+10. Do not activate controls that send or publish communications, submit forms, purchase, transfer money, or delete important data. Stop before the final action and ask the user to confirm explicitly.
 
 LANGUAGE RULES:
 - Detect the language of the user's most recent command.
@@ -339,10 +351,7 @@ RESPONSE FORMAT (strict JSON, one action only):
       throw const FormatException('Invalid screen dimensions');
     }
     final action = response.actions.single;
-    final coordinates = [
-      action.params['startX'],
-      action.params['endX'],
-    ];
+    final coordinates = [action.params['startX'], action.params['endX']];
     final verticalCoordinates = [
       action.params['startY'],
       action.params['endY'],

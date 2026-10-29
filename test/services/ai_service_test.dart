@@ -13,11 +13,26 @@ void main() {
 
   test('parses a validated action response', () {
     final response = AiService.parseAgentResponse(
-      jsonEncode(responseWith({'type': 'open_app', 'package': 'com.example.app'})),
+      jsonEncode(
+        responseWith({'type': 'open_app', 'package': 'com.example.app'}),
+      ),
     );
 
     expect(response.actions.single.type, 'open_app');
     expect(response.actions.single.params['package'], 'com.example.app');
+  });
+
+  test('parses supported press gestures and focused-field clearing', () {
+    for (final action in [
+      {'type': 'long_press', 'element': 2},
+      {'type': 'double_tap', 'element': 4},
+      {'type': 'clear'},
+    ]) {
+      final response = AiService.parseAgentResponse(
+        jsonEncode(responseWith(action)),
+      );
+      expect(response.actions.single.type, action['type']);
+    }
   });
 
   test('rejects unknown actions and unexpected action parameters', () {

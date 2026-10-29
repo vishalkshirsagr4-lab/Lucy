@@ -160,6 +160,32 @@ class ScreenCaptureManager {
     }
   }
 
+  Future<bool> performLongPress(double x, double y) async {
+    try {
+      return await _channel.invokeMethod<bool>('performLongPress', {
+            'x': x,
+            'y': y,
+          }) ??
+          false;
+    } catch (e) {
+      print('Error performing long press: $e');
+      return false;
+    }
+  }
+
+  Future<bool> performDoubleTap(double x, double y) async {
+    try {
+      return await _channel.invokeMethod<bool>('performDoubleTap', {
+            'x': x,
+            'y': y,
+          }) ??
+          false;
+    } catch (e) {
+      print('Error performing double tap: $e');
+      return false;
+    }
+  }
+
   /// Type text into the currently focused input
   Future<bool> performType(String text) async {
     try {

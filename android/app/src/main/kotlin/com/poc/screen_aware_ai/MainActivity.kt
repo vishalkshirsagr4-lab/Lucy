@@ -137,12 +137,28 @@ class MainActivity : FlutterActivity() {
                         result.error("NO_SERVICE", "Accessibility service not enabled", null)
                     }
                 }
+                "performLongPress", "performDoubleTap" -> {
+                    val x = call.argument<Double>("x")?.toFloat() ?: 0f
+                    val y = call.argument<Double>("y")?.toFloat() ?: 0f
+                    val service = ScreenActionService.instance
+                    if (service == null) {
+                        result.error("NO_SERVICE", "Accessibility service not enabled", null)
+                    } else {
+                        Thread {
+                            val success = if (call.method == "performLongPress") {
+                                service.performLongPress(x, y)
+                            } else {
+                                service.performDoubleTap(x, y)
+                            }
+                            runOnUiThread { result.success(success) }
+                        }.start()
+                    }
+                }
                 "performType" -> {
                     val text = call.argument<String>("text") ?: ""
                     val service = ScreenActionService.instance
                     if (service != null) {
-                        service.performType(text)
-                        result.success(true)
+                        result.success(service.performType(text))
                     } else {
                         result.error("NO_SERVICE", "Accessibility service not enabled", null)
                     }
@@ -150,8 +166,7 @@ class MainActivity : FlutterActivity() {
                 "pressBack" -> {
                     val service = ScreenActionService.instance
                     if (service != null) {
-                        service.pressBack()
-                        result.success(true)
+                        result.success(service.pressBack())
                     } else {
                         result.error("NO_SERVICE", "Accessibility service not enabled", null)
                     }
@@ -159,8 +174,7 @@ class MainActivity : FlutterActivity() {
                 "pressHome" -> {
                     val service = ScreenActionService.instance
                     if (service != null) {
-                        service.pressHome()
-                        result.success(true)
+                        result.success(service.pressHome())
                     } else {
                         result.error("NO_SERVICE", "Accessibility service not enabled", null)
                     }

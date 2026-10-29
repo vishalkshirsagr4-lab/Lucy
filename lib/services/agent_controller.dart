@@ -184,7 +184,8 @@ class AgentController extends ChangeNotifier {
       : 'Not active; Android permission is requested when voice starts';
   double get speechRate => _voiceService.speechRate;
   Duration get followupTimeout => _followupTimeout;
-  String get wakeWordStatus => 'Unavailable: no offline wake-word engine installed';
+  String get wakeWordStatus =>
+      'Unavailable: no offline wake-word engine installed';
   String get backgroundListeningStatus =>
       'Unavailable: voice input is manual and stops outside the active app session';
 
@@ -206,6 +207,11 @@ class AgentController extends ChangeNotifier {
     }
 
     final savedSpeechRate = prefs.getDouble('lucy_speech_rate');
+    if (savedSpeechRate != null &&
+        savedSpeechRate >= 0.1 &&
+        savedSpeechRate <= 1.0) {
+      await _voiceService.setSpeechRate(savedSpeechRate);
+    }
     final savedTimeoutSeconds = prefs.getInt('lucy_followup_timeout_seconds');
     if (savedTimeoutSeconds != null &&
         savedTimeoutSeconds >= 15 &&
@@ -324,7 +330,8 @@ class AgentController extends ChangeNotifier {
       'Manual voice listening started. Lucy does not listen for a wake phrase in the background.',
       false,
     );
-    _statusMessage = 'Manual listening is active in Lucy. Tap the button to stop.';
+    _statusMessage =
+        'Manual listening is active in Lucy. Tap the button to stop.';
     _isAskingForFurtherHelp = false;
     notifyListeners();
 
@@ -360,9 +367,11 @@ class AgentController extends ChangeNotifier {
 
   Future<void> stopAgent({String? statusMessage}) async {
     _isActive = false;
+    // Keep cancellation set until the in-flight loop observes it. Clearing it
+    // here could let a pending model response execute one more action.
+    _cancelRequested = true;
     _followupTimeoutTimer?.cancel();
     _followupTimeoutTimer = null;
-    _cancelRequested = false;
     await _voiceService.stopListening();
     await _voiceService.stopSpeaking();
     _setState(AgentState.idle);
@@ -390,10 +399,7 @@ class AgentController extends ChangeNotifier {
   }
 
   /// Main handler: user says something → agent loop begins.
-  Future<void> _handleUserInput(
-    String text, {
-    bool voiceInput = true,
-  }) async {
+  Future<void> _handleUserInput(String text, {bool voiceInput = true}) async {
     if (!_isActive ||
         (voiceInput && _state != AgentState.listening) ||
         (!voiceInput &&
@@ -519,10 +525,7 @@ class AgentController extends ChangeNotifier {
   }
 
   /// The core agent loop: capture → analyze → act → repeat.
-  Future<void> _runAgentLoop(
-    String userMessage, {
-    String? requestId,
-  }) async {
+  Future<void> _runAgentLoop(String userMessage, {String? requestId}) async {
     _cancelRequested = false;
     int step = 0;
     String currentMessage = userMessage;
@@ -670,7 +673,6 @@ class AgentController extends ChangeNotifier {
         while (_voiceService.isSpeaking && !_cancelRequested) {
           await Future.delayed(const Duration(milliseconds: 200));
         }
-
       }
 
       if (_cancelRequested) break;
@@ -802,7 +804,6 @@ class AgentController extends ChangeNotifier {
         // Increasing delay between retries: 200ms, 400ms
         await Future.delayed(Duration(milliseconds: 200 * (i + 1)));
       }
-
     }
     print('All $maxRetries screenshot capture attempts failed');
     return null;
@@ -906,11 +907,24 @@ class AgentController extends ChangeNotifier {
         (element['type']?.toString().contains('EditText') ?? false);
   }
 
+  bool _isConsequentialControl(Map<String, dynamic>? element) {
+    if (element == null) return false;
+    final label = '${element['text'] ?? ''} ${element['desc'] ?? ''}'
+        .toLowerCase()
+        .trim();
+    if (label.isEmpty) return false;
+    return RegExp(
+      r'\b(send|post|publish|buy|purchase|pay|transfer|delete|remove|submit|place order)\b',
+    ).hasMatch(label);
+  }
+
   Duration _readinessTimeoutForAction(AgentAction action) {
     switch (action.type) {
       case 'open_app':
         return _openAppReadyTimeout;
       case 'tap':
+      case 'long_press':
+      case 'double_tap':
         return _tapReadyTimeout;
       case 'type':
         return _typeReadyTimeout;
@@ -955,6 +969,8 @@ class AgentController extends ChangeNotifier {
         }
         return packageChanged || treeChanged;
       case 'tap':
+      case 'long_press':
+      case 'double_tap':
         final expectsFocusedInput = _tapTargetsEditableField(
           action,
           beforeSnapshot,
@@ -1020,7 +1036,16 @@ class AgentController extends ChangeNotifier {
     _UiSnapshot? beforeSnapshot,
   ) async {
     // Actions that require the accessibility service
-    const accessibilityActions = {'tap', 'type', 'swipe', 'back', 'home'};
+    const accessibilityActions = {
+      'tap',
+      'long_press',
+      'double_tap',
+      'type',
+      'clear',
+      'swipe',
+      'back',
+      'home',
+    };
 
     if (accessibilityActions.contains(action.type)) {
       final hasAccessibility = await _screenCapture.isAccessibilityEnabled();
@@ -1045,7 +1070,19 @@ class AgentController extends ChangeNotifier {
           break;
 
         case 'tap':
+        case 'long_press':
+        case 'double_tap':
           final elementId = action.params['element'] as num?;
+          final target = elementId == null || beforeSnapshot == null
+              ? null
+              : _findElementById(elementId.toInt(), beforeSnapshot.elements);
+          if (_isConsequentialControl(target)) {
+            _addConversation(
+              'Stopped before activating "${target?['text'] ?? target?['desc']}". Confirm and complete this consequential action yourself, then tell Lucy to continue.',
+              false,
+            );
+            return _ActionExecutionResult(beforeSnapshot, false);
+          }
           final coords = elementId == null
               ? null
               : _resolveElementCoordinates(
@@ -1053,10 +1090,13 @@ class AgentController extends ChangeNotifier {
                   beforeSnapshot?.elements ?? const [],
                 );
           if (coords != null) {
-            succeeded = await _screenCapture.performTap(
-              coords['x']!,
-              coords['y']!,
-            );
+            final x = coords['x']!;
+            final y = coords['y']!;
+            succeeded = switch (action.type) {
+              'long_press' => await _screenCapture.performLongPress(x, y),
+              'double_tap' => await _screenCapture.performDoubleTap(x, y),
+              _ => await _screenCapture.performTap(x, y),
+            };
           }
           break;
 
@@ -1065,6 +1105,10 @@ class AgentController extends ChangeNotifier {
           if (text.isNotEmpty) {
             succeeded = await _screenCapture.performType(text);
           }
+          break;
+
+        case 'clear':
+          succeeded = await _screenCapture.performType('');
           break;
 
         case 'swipe':
